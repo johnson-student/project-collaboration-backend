@@ -22,7 +22,7 @@ CREATE TABLE users (
   avatar        VARCHAR(500)         NULL DEFAULT NULL,
   initials      VARCHAR(4)           NULL,
   color         VARCHAR(7)       NOT NULL DEFAULT '#6366f1',
-  status        ENUM('Active','Away','Busy','Offline') NOT NULL DEFAULT 'Offline',
+  status        ENUM('Active','Away','Busy','Offline') NOT NULL DEFAULT 'Active',
   joined_at     DATE                 NULL,
   refresh_token VARCHAR(500)         NULL DEFAULT NULL,
   reset_token   VARCHAR(255)         NULL DEFAULT NULL,
@@ -159,7 +159,32 @@ CREATE TABLE task_comments (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
--- 7. NOTIFICATIONS
+-- 7. SUBTASKS
+-- ============================================================
+-- Subtasks have no assignee of their own: ownership is always inherited
+-- from the parent task, so only subtask-specific data lives here.
+CREATE TABLE IF NOT EXISTS subtasks (
+  id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  task_id      INT UNSIGNED NOT NULL,
+  title        VARCHAR(300) NOT NULL,
+  description  TEXT NULL,
+  status       ENUM('Todo','In Progress','Done') NOT NULL DEFAULT 'Todo',
+  priority     ENUM('High','Medium','Low')        NOT NULL DEFAULT 'Medium',
+  due_date     DATE NULL,
+  position     INT UNSIGNED NOT NULL DEFAULT 0,
+  created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (id),
+  INDEX idx_subtasks_task     (task_id),
+  INDEX idx_subtasks_status   (status),
+  INDEX idx_subtasks_due_date (due_date),
+  CONSTRAINT fk_subtasks_task FOREIGN KEY (task_id)
+    REFERENCES tasks (id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 8. NOTIFICATIONS
 -- ============================================================
 CREATE TABLE notifications (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -175,9 +200,15 @@ CREATE TABLE notifications (
 
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-  PRIMARY KEY (id)
-);
+  PRIMARY KEY (id),
+  INDEX idx_notifications_user (user_id, is_read),
+  CONSTRAINT fk_notif_user FOREIGN KEY (user_id)
+    REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ============================================================
+-- 9. INVITATIONS, ASSIGNMENT REQUESTS, FILES, ACTIVITY, CHAT
+-- ============================================================
 CREATE TABLE IF NOT EXISTS project_invitations (
   id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
   project_id   INT UNSIGNED NOT NULL,
@@ -268,7 +299,7 @@ CREATE TABLE IF NOT EXISTS project_messages (
 
 
 -- ============================================================
--- 8. SEED DATA
+-- 10. SEED DATA
 -- ============================================================
 
 -- Users (passwords are bcrypt of "password123")
@@ -334,8 +365,4 @@ INSERT INTO notifications (id, user_id, type, title, message, is_read, action_ur
 (3, 1, 'deadline',       'Deadline approaching',     '"API Gateway Migration" is due in 2 days',                   0, '/projects/3', '2026-06-04 07:00:00'),
 (4, 1, 'project_invite', 'Added to project',         'You were added to "Mobile App Launch" by Alex Rivera',       1, '/projects/4', '2026-06-03 14:22:00'),
 (5, 1, 'task_done',      'Task completed',           'Jordan completed "Build Button component"',                  1, '/tasks/8',    '2026-06-03 11:05:00');
-
-
--- ===== Added from migrations =====
-
 
