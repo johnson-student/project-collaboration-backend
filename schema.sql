@@ -23,6 +23,9 @@ CREATE TABLE users (
   initials      VARCHAR(4)           NULL,
   color         VARCHAR(7)       NOT NULL DEFAULT '#6366f1',
   status        ENUM('Active','Away','Busy','Offline') NOT NULL DEFAULT 'Active',
+  email_verified TINYINT(1)      NOT NULL DEFAULT 0,
+  verify_token  VARCHAR(255)         NULL DEFAULT NULL,
+  verify_token_expires DATETIME      NULL DEFAULT NULL,
   joined_at     DATE                 NULL,
   refresh_token VARCHAR(500)         NULL DEFAULT NULL,
   reset_token   VARCHAR(255)         NULL DEFAULT NULL,
@@ -33,7 +36,8 @@ CREATE TABLE users (
   PRIMARY KEY (id),
   UNIQUE KEY uq_users_email (email),
   INDEX idx_users_status (status),
-  INDEX idx_users_reset_token (reset_token)
+  INDEX idx_users_reset_token (reset_token),
+  INDEX idx_users_verify_token (verify_token)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ============================================================
@@ -268,7 +272,7 @@ CREATE TABLE IF NOT EXISTS activity_logs (
   id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
   project_id   INT UNSIGNED NOT NULL,
   user_id      INT UNSIGNED     NULL,
-  event_type   VARCHAR(60)  NOT NULL COMMENT 'project_created|member_invited|member_joined|member_removed|task_created|task_assigned|task_completed|file_uploaded|file_deleted|comment_added',
+  event_type   VARCHAR(60)  NOT NULL COMMENT 'project_created|member_invited|member_joined|member_removed|task_created|task_assigned|task_completed|task_deleted|file_uploaded|file_deleted|comment_added',
   description  TEXT         NOT NULL,
   meta         JSON             NULL COMMENT 'Extra structured data (task_id, file_id, etc.)',
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,

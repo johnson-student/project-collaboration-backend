@@ -116,8 +116,18 @@ const assertAssigneeIsMember = async (projectId, assigneeId) => {
 };
 
 // FIXED: verify caller is a member of the task's project
-const assertCallerIsMember = async (projectId, userId) => {
-  if (!projectId) return;
+// For tasks inside a project: caller must be a project member.
+// For personal tasks (no project): caller must be the task's reporter.
+// Pass reporterId whenever an existing task is being accessed; omit it
+// only when there is no task yet (e.g. creating a new personal task).
+const assertCallerIsMember = async (projectId, userId, reporterId) => {
+  if (!projectId) {
+    if (reporterId !== undefined && Number(reporterId) !== Number(userId))
+      throw Object.assign(new Error('Access denied — not your task'), {
+        status: 403,
+      });
+    return;
+  }
   const [rows] = await db.query(
     'SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ?',
     [projectId, userId],
@@ -140,12 +150,12 @@ const getTasks = asyncHandler(async (req, res) => {
   } = req.query;
   const offset = (Number(page) - 1) * Number(limit);
 
-  // FIXED: always restrict to projects the requesting user is a member of.
-  // If projectId is supplied it must also be one they belong to.
-  let where = `WHERE (t.project_id IS NULL OR EXISTS (
+  // Restrict to projects the requesting user is a member of; personal
+  // tasks (no project) are only visible to the user who created them.
+  let where = `WHERE ((t.project_id IS NULL AND t.reporter_id = ?) OR EXISTS (
     SELECT 1 FROM project_members pm WHERE pm.project_id = t.project_id AND pm.user_id = ?
   ))`;
-  const params = [req.user.id];
+  const params = [req.user.id, req.user.id];
 
   if (projectId) {
     where += ' AND t.project_id = ?';
@@ -199,7 +209,7 @@ const getTaskById = asyncHandler(async (req, res) => {
     [req.params.id],
   );
   if (!rows.length) return fail(res, 'Task not found', 404);
-  await assertCallerIsMember(rows[0].project_id, req.user.id);
+  await assertCallerIsMember(rows[0].project_id, req.user.id, rows[0].reporter_id);
 
   const [task] = await attachTags(rows);
   const [comments] = await db.query(
@@ -309,7 +319,7 @@ const updateTask = asyncHandler(async (req, res) => {
     const task = existing[0];
 
     // Verify caller membership in the task's project
-    await assertCallerIsMember(task.project_id, req.user.id);
+    await assertCallerIsMember(task.project_id, req.user.id, task.reporter_id);
 
     // If assignee is being changed, validate new assignee is a project member
     const newAssigneeId = body.assigneeId ?? body.assignee_id;
@@ -390,13 +400,22 @@ const updateTask = asyncHandler(async (req, res) => {
 // ── DELETE /api/tasks/:id ────────────────────────────────────────────────
 const deleteTask = asyncHandler(async (req, res) => {
   const [rows] = await db.query(
-    'SELECT project_id, reporter_id FROM tasks WHERE id = ?',
+    'SELECT project_id, reporter_id, title FROM tasks WHERE id = ?',
     [req.params.id],
   );
   if (!rows.length) return fail(res, 'Task not found', 404);
-  await assertCallerIsMember(rows[0].project_id, req.user.id);
+  await assertCallerIsMember(rows[0].project_id, req.user.id, rows[0].reporter_id);
   await db.query('DELETE FROM tasks WHERE id = ?', [req.params.id]);
-  if (rows[0].project_id) await recalcProgress(rows[0].project_id);
+  if (rows[0].project_id) {
+    await recalcProgress(rows[0].project_id);
+    await logActivity({
+      projectId: rows[0].project_id,
+      userId: req.user.id,
+      eventType: 'task_deleted',
+      description: `${req.user.name} deleted task "${rows[0].title}"`,
+      meta: { task_id: Number(req.params.id) },
+    });
+  }
   noContent(res);
 });
 
@@ -408,11 +427,11 @@ const moveTask = asyncHandler(async (req, res) => {
   if (!valid.includes(status))
     return fail(res, `status must be one of: ${valid.join(', ')}`, 400);
 
-  const [rows] = await db.query('SELECT project_id, status FROM tasks WHERE id = ?', [
+  const [rows] = await db.query('SELECT project_id, status, reporter_id FROM tasks WHERE id = ?', [
     id,
   ]);
   if (!rows.length) return fail(res, 'Task not found', 404);
-  await assertCallerIsMember(rows[0].project_id, req.user.id);
+  await assertCallerIsMember(rows[0].project_id, req.user.id, rows[0].reporter_id);
 
   // Completing a task with unfinished subtasks needs explicit confirmation
   // (Rule 3) unless the caller already confirmed via completeSubtasks.
@@ -468,13 +487,13 @@ const assignTask = asyncHandler(async (req, res) => {
   const { userId } = req.body;
 
   const [rows] = await db.query(
-    'SELECT title, project_id FROM tasks WHERE id = ?',
+    'SELECT title, project_id, reporter_id FROM tasks WHERE id = ?',
     [id],
   );
   if (!rows.length) return fail(res, 'Task not found', 404);
   const task = rows[0];
 
-  await assertCallerIsMember(task.project_id, req.user.id);
+  await assertCallerIsMember(task.project_id, req.user.id, task.reporter_id);
   await assertAssigneeIsMember(task.project_id, userId || null);
 
   await db.query('UPDATE tasks SET assignee_id = ? WHERE id = ?', [
@@ -515,11 +534,11 @@ const addComment = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { comment } = req.body;
   const [rows] = await db.query(
-    'SELECT title, assignee_id, project_id FROM tasks WHERE id = ?',
+    'SELECT title, assignee_id, project_id, reporter_id FROM tasks WHERE id = ?',
     [id],
   );
   if (!rows.length) return fail(res, 'Task not found', 404);
-  await assertCallerIsMember(rows[0].project_id, req.user.id);
+  await assertCallerIsMember(rows[0].project_id, req.user.id, rows[0].reporter_id);
 
   const [result] = await db.query(
     'INSERT INTO task_comments (task_id, user_id, body) VALUES (?,?,?)',
@@ -596,11 +615,11 @@ const deleteComment = asyncHandler(async (req, res) => {
 const getSubtasks = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const [taskRows] = await db.query(
-    'SELECT project_id FROM tasks WHERE id = ?',
+    'SELECT project_id, reporter_id FROM tasks WHERE id = ?',
     [id],
   );
   if (!taskRows.length) return fail(res, 'Task not found', 404);
-  await assertCallerIsMember(taskRows[0].project_id, req.user.id);
+  await assertCallerIsMember(taskRows[0].project_id, req.user.id, taskRows[0].reporter_id);
 
   const [subtasks] = await db.query(
     `SELECT * FROM subtasks
@@ -625,13 +644,13 @@ const createSubtask = asyncHandler(async (req, res) => {
   if (!title?.trim()) return fail(res, 'Title is required', 400);
 
   const [taskRows] = await db.query(
-    'SELECT project_id FROM tasks WHERE id = ?',
+    'SELECT project_id, reporter_id FROM tasks WHERE id = ?',
     [id],
   );
   if (!taskRows.length) return fail(res, 'Task not found', 404);
   const projectId = taskRows[0].project_id;
 
-  await assertCallerIsMember(projectId, req.user.id);
+  await assertCallerIsMember(projectId, req.user.id, taskRows[0].reporter_id);
 
   const [[{ maxPos }]] = await db.query(
     'SELECT COALESCE(MAX(position),0)+1 AS maxPos FROM subtasks WHERE task_id = ?',
@@ -660,14 +679,14 @@ const updateSubtask = asyncHandler(async (req, res) => {
   const { title, description, status, priority, dueDate } = req.body;
 
   const [subtaskRows] = await db.query(
-    'SELECT s.*, t.project_id FROM subtasks s JOIN tasks t ON t.id = s.task_id WHERE s.id = ? AND s.task_id = ?',
+    'SELECT s.*, t.project_id, t.reporter_id AS task_reporter_id FROM subtasks s JOIN tasks t ON t.id = s.task_id WHERE s.id = ? AND s.task_id = ?',
     [subtaskId, id],
   );
   if (!subtaskRows.length) return fail(res, 'Subtask not found', 404);
   const sub = subtaskRows[0];
   const projectId = sub.project_id;
 
-  await assertCallerIsMember(projectId, req.user.id);
+  await assertCallerIsMember(projectId, req.user.id, sub.task_reporter_id);
 
   const fields = [],
     vals = [];
@@ -695,11 +714,11 @@ const updateSubtask = asyncHandler(async (req, res) => {
 const deleteSubtask = asyncHandler(async (req, res) => {
   const { id, subtaskId } = req.params;
   const [subtaskRows] = await db.query(
-    'SELECT t.project_id FROM subtasks s JOIN tasks t ON t.id = s.task_id WHERE s.id = ? AND s.task_id = ?',
+    'SELECT t.project_id, t.reporter_id FROM subtasks s JOIN tasks t ON t.id = s.task_id WHERE s.id = ? AND s.task_id = ?',
     [subtaskId, id],
   );
   if (!subtaskRows.length) return fail(res, 'Subtask not found', 404);
-  await assertCallerIsMember(subtaskRows[0].project_id, req.user.id);
+  await assertCallerIsMember(subtaskRows[0].project_id, req.user.id, subtaskRows[0].reporter_id);
   await db.query('DELETE FROM subtasks WHERE id = ?', [subtaskId]);
   await syncParentStatusFromSubtasks(id);
   noContent(res);
@@ -714,11 +733,11 @@ const patchSubtaskStatus = asyncHandler(async (req, res) => {
     return fail(res, `status must be one of: ${valid.join(', ')}`, 400);
 
   const [rows] = await db.query(
-    'SELECT s.*, t.project_id FROM subtasks s JOIN tasks t ON t.id = s.task_id WHERE s.id = ? AND s.task_id = ?',
+    'SELECT s.*, t.project_id, t.reporter_id AS task_reporter_id FROM subtasks s JOIN tasks t ON t.id = s.task_id WHERE s.id = ? AND s.task_id = ?',
     [subtaskId, id],
   );
   if (!rows.length) return fail(res, 'Subtask not found', 404);
-  await assertCallerIsMember(rows[0].project_id, req.user.id);
+  await assertCallerIsMember(rows[0].project_id, req.user.id, rows[0].task_reporter_id);
 
   await db.query('UPDATE subtasks SET status = ? WHERE id = ?', [status, subtaskId]);
   await syncParentStatusFromSubtasks(id);
@@ -736,9 +755,9 @@ const reorderSubtasks = asyncHandler(async (req, res) => {
   const { order } = req.body; // [{ id, position }, ...]
   if (!Array.isArray(order)) return fail(res, 'order must be an array', 400);
 
-  const [taskRows] = await db.query('SELECT project_id FROM tasks WHERE id = ?', [id]);
+  const [taskRows] = await db.query('SELECT project_id, reporter_id FROM tasks WHERE id = ?', [id]);
   if (!taskRows.length) return fail(res, 'Task not found', 404);
-  await assertCallerIsMember(taskRows[0].project_id, req.user.id);
+  await assertCallerIsMember(taskRows[0].project_id, req.user.id, taskRows[0].reporter_id);
 
   const conn = await db.getConnection();
   try {

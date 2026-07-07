@@ -4,6 +4,7 @@ const db = require("../config/db");
 const { ok, created, fail } = require("../utils/response");
 const { asyncHandler } = require("../middleware/error.middleware");
 const { signAccess, signRefresh } = require("../middleware/auth.middleware");
+const { sendVerificationEmail } = require("../utils/email");
 
 const REFRESH_COOKIE_NAME = "refreshToken";
 const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
@@ -71,6 +72,21 @@ const COLORS = [
   "#ef4444",
 ];
 
+const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+const issueVerificationToken = async (userId) => {
+  const token = crypto.randomBytes(32).toString("hex");
+  const expires = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
+  await db.query(
+    "UPDATE users SET verify_token = ?, verify_token_expires = ? WHERE id = ?",
+    [token, expires, userId],
+  );
+  return token;
+};
+
+const buildVerifyUrl = (token) =>
+  `${process.env.CLIENT_URL || "http://localhost:5173"}/verify-email?token=${token}`;
+
 // ── POST /api/auth/register ──────────────────────────────────────────────
 const register = asyncHandler(async (req, res) => {
   const { name, email, password } = req.body;
@@ -89,23 +105,23 @@ const register = asyncHandler(async (req, res) => {
   const color = COLORS[Math.floor(Math.random() * COLORS.length)];
 
   const [result] = await db.query(
-    `INSERT INTO users (name, email, password_hash, initials, color, status)
-     VALUES (?,?,?,?,?,'Active')`,
+    `INSERT INTO users (name, email, password_hash, initials, color, status, email_verified)
+     VALUES (?,?,?,?,?,'Active',0)`,
     [name.trim(), email.toLowerCase(), hash, initials, color],
   );
 
-  const userId = result.insertId;
-  const accessToken = signAccess({ id: userId });
-  const refreshToken = signRefresh({ id: userId });
-  const hashedRefresh = await bcrypt.hash(refreshToken, 8);
-  await db.query("UPDATE users SET refresh_token = ? WHERE id = ?", [
-    hashedRefresh,
-    userId,
-  ]);
+  const token = await issueVerificationToken(result.insertId);
+  try {
+    await sendVerificationEmail(email.toLowerCase(), name.trim(), buildVerifyUrl(token));
+  } catch (err) {
+    console.error("[email] failed to send verification email:", err.message);
+  }
 
-  const [rows] = await db.query("SELECT * FROM users WHERE id = ?", [userId]);
-  setRefreshCookie(res, refreshToken);
-  created(res, { user: safeUser(rows[0]), accessToken }, "Account created");
+  created(
+    res,
+    { requiresVerification: true, email: email.toLowerCase() },
+    "Account created — check your email to verify your address",
+  );
 });
 
 // ── POST /api/auth/login ─────────────────────────────────────────────────
@@ -122,6 +138,13 @@ const login = asyncHandler(async (req, res) => {
   const user = rows[0];
   const match = await bcrypt.compare(password, user.password_hash);
   if (!match) return fail(res, "Invalid credentials", 401);
+
+  if (!user.email_verified)
+    return fail(
+      res,
+      "Please verify your email address before signing in. Check your inbox for the verification link.",
+      403,
+    );
 
   const accessToken = signAccess({ id: user.id });
   const refreshToken = signRefresh({ id: user.id });
@@ -235,6 +258,44 @@ const resetPassword = asyncHandler(async (req, res) => {
   ok(res, null, "Password reset successfully — please sign in again");
 });
 
+// ── POST /api/auth/verify-email ─────────────────────────────────────────
+const verifyEmail = asyncHandler(async (req, res) => {
+  const { token } = req.body;
+  if (!token) return fail(res, "Verification token is required", 400);
+
+  const [rows] = await db.query(
+    "SELECT id, email_verified FROM users WHERE verify_token = ? AND verify_token_expires > NOW()",
+    [token],
+  );
+  if (!rows.length)
+    return fail(res, "Verification link is invalid or has expired", 400);
+
+  await db.query(
+    "UPDATE users SET email_verified = 1, verify_token = NULL, verify_token_expires = NULL WHERE id = ?",
+    [rows[0].id],
+  );
+  ok(res, null, "Email verified successfully — you can now sign in");
+});
+
+// ── POST /api/auth/resend-verification ──────────────────────────────────
+const resendVerification = asyncHandler(async (req, res) => {
+  const { email } = req.body;
+  // Always return 200 to prevent email enumeration
+  const [rows] = await db.query(
+    "SELECT id, name, email_verified FROM users WHERE email = ?",
+    [email?.toLowerCase()],
+  );
+  if (rows.length && !rows[0].email_verified) {
+    const token = await issueVerificationToken(rows[0].id);
+    try {
+      await sendVerificationEmail(email.toLowerCase(), rows[0].name, buildVerifyUrl(token));
+    } catch (err) {
+      console.error("[email] failed to send verification email:", err.message);
+    }
+  }
+  ok(res, null, "If that email is registered and unverified, a new link has been sent");
+});
+
 module.exports = {
   register,
   login,
@@ -243,4 +304,6 @@ module.exports = {
   getMe,
   forgotPassword,
   resetPassword,
+  verifyEmail,
+  resendVerification,
 };

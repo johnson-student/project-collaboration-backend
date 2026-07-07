@@ -1,7 +1,7 @@
 const express = require("express");
 const router  = express.Router();
 const rateLimit = require("express-rate-limit");
-const { register, login, refresh, logout, getMe, forgotPassword, resetPassword } = require("../controllers/auth.controller");
+const { register, login, refresh, logout, getMe, forgotPassword, resetPassword, verifyEmail, resendVerification } = require("../controllers/auth.controller");
 const { protect } = require("../middleware/auth.middleware");
 
 // Strict rate-limit on auth endpoints (15 req / 15 min per IP)
@@ -20,5 +20,7 @@ router.post("/logout",          protect,     logout);
 router.get ("/me",              protect,     getMe);
 router.post("/forgot-password", authLimiter, forgotPassword);
 router.post("/reset-password",  authLimiter, resetPassword);
+router.post("/verify-email",         authLimiter, verifyEmail);
+router.post("/resend-verification",  authLimiter, resendVerification);
 
 module.exports = router;

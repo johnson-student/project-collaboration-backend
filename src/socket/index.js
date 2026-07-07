@@ -26,6 +26,7 @@ function initSocket(httpServer) {
 
       let decoded;
       try {
+        
         decoded = jwt.verify(token, process.env.JWT_SECRET);
       } catch (err) {
         return next(new Error("Invalid or expired token"));
