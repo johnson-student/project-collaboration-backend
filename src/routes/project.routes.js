@@ -8,6 +8,7 @@ const { createInvitation, getProjectInvitations, cancelInvitation } = require(".
 const { uploadFile, getProjectFiles, downloadFile, deleteFile } = require("../controllers/file.controller");
 const { getProjectActivity } = require("../controllers/activity.controller");
 const { getProjectMessages, sendMessage, editMessage, deleteMessage } = require("../controllers/chat.controller");
+const { getAiMessages, sendAiMessage, clearAiMessages } = require("../controllers/ai.controller");
 const { protect, requireProjectMember, requireProjectOwnerOrAdmin } = require("../middleware/auth.middleware");
 const { projectFileUpload } = require("../middleware/fileUpload.middleware");
 
@@ -51,8 +52,20 @@ router.get("/:id/activity", requireProjectMember, getProjectActivity);
 
 // ── Chat ─────────────────────────────────────────────────────────────────
 router.get   ("/:id/messages",                requireProjectMember, getProjectMessages);
-router.post  ("/:id/messages",                requireProjectMember, sendMessage);
+// Multer only kicks in for multipart requests (chat attachments); plain JSON
+// messages pass straight through.
+router.post  ("/:id/messages",                requireProjectMember, (req, res, next) => {
+  projectFileUpload(req, res, (err) => {
+    if (err) return res.status(400).json({ success: false, message: err.message });
+    next();
+  });
+}, sendMessage);
 router.put   ("/:id/messages/:messageId",     requireProjectMember, editMessage);
 router.delete("/:id/messages/:messageId",     requireProjectMember, deleteMessage);
+
+// ── AI Assistant (Gemini) ────────────────────────────────────────────────
+router.get   ("/:id/ai/messages", requireProjectMember, getAiMessages);
+router.post  ("/:id/ai/chat",     requireProjectMember, sendAiMessage);
+router.delete("/:id/ai/messages", requireProjectMember, clearAiMessages);
 
 module.exports = router;

@@ -1,6 +1,10 @@
 const multer = require("multer");
 const path   = require("path");
+const fs     = require("fs");
 const { v4: uuidv4 } = require("uuid");
+
+const UPLOAD_DIR = path.join(__dirname, "../../uploads/project-files");
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const ALLOWED_TYPES = [
   ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
@@ -14,7 +18,7 @@ const MAX_SIZE = 50 * 1024 * 1024; // 50 MB
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, path.join(__dirname, "../../uploads/project-files"));
+    cb(null, UPLOAD_DIR);
   },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();

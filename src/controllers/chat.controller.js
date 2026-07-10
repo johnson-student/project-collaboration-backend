@@ -2,13 +2,21 @@ const db = require("../config/db");
 const { ok, created, fail, noContent } = require("../utils/response");
 const { asyncHandler } = require("../middleware/error.middleware");
 const { emitToProject } = require("../socket");
+const { logActivity } = require("../utils/activity");
 
-const selectMessage = `
-  SELECT pm.*, u.name AS user_name, u.initials, u.color, u.avatar
+const messageFields = `
+  pm.*, u.name AS user_name, u.initials, u.color, u.avatar,
+  pf.original_name AS attachment_name, pf.stored_name AS attachment_stored_name,
+  pf.mime_type AS attachment_mime, pf.size_bytes AS attachment_size
+`;
+
+const messageJoins = `
   FROM project_messages pm
   JOIN users u ON u.id = pm.user_id
-  WHERE pm.id = ?
+  LEFT JOIN project_files pf ON pf.id = pm.attachment_id
 `;
+
+const selectMessage = `SELECT ${messageFields} ${messageJoins} WHERE pm.id = ?`;
 
 // ── GET /api/projects/:id/messages?before=<id>&limit=50 ─────────────────
 // Cursor-paginated, returns newest page by default (oldest-first within page)
@@ -25,9 +33,8 @@ const getProjectMessages = asyncHandler(async (req, res) => {
   }
 
   const [rows] = await db.query(
-    `SELECT pm.*, u.name AS user_name, u.initials, u.color, u.avatar
-     FROM project_messages pm
-     JOIN users u ON u.id = pm.user_id
+    `SELECT ${messageFields}
+     ${messageJoins}
      ${whereClause}
      ORDER BY pm.id DESC
      LIMIT ?`,
@@ -39,15 +46,36 @@ const getProjectMessages = asyncHandler(async (req, res) => {
 });
 
 // ── POST /api/projects/:id/messages ──────────────────────────────────────
+// Accepts JSON ({ body }) or multipart/form-data with an optional "file"
+// field. An uploaded file is registered in project_files, so it also shows
+// up on the project's Files page.
 const sendMessage = asyncHandler(async (req, res) => {
   const projectId = req.params.id;
-  const { body } = req.body;
-  if (!body?.trim()) return fail(res, "Message body is required", 400);
+  const body = (req.body?.body || "").trim();
+  if (!body && !req.file) return fail(res, "Message body or attachment is required", 400);
   if (body.length > 4000) return fail(res, "Message is too long (max 4000 characters)", 400);
 
+  let attachmentId = null;
+  if (req.file) {
+    const { originalname, filename, mimetype, size } = req.file;
+    const [fileResult] = await db.query(
+      "INSERT INTO project_files (project_id, uploader_id, original_name, stored_name, mime_type, size_bytes) VALUES (?,?,?,?,?,?)",
+      [projectId, req.user.id, originalname, filename, mimetype, size]
+    );
+    attachmentId = fileResult.insertId;
+
+    await logActivity({
+      projectId,
+      userId: req.user.id,
+      eventType: "file_uploaded",
+      description: `${req.user.name} shared "${originalname}" in chat`,
+      meta: { file_id: attachmentId, file_name: originalname },
+    });
+  }
+
   const [result] = await db.query(
-    "INSERT INTO project_messages (project_id, user_id, body) VALUES (?,?,?)",
-    [projectId, req.user.id, body.trim()]
+    "INSERT INTO project_messages (project_id, user_id, body, attachment_id) VALUES (?,?,?,?)",
+    [projectId, req.user.id, body, attachmentId]
   );
 
   const [rows] = await db.query(selectMessage, [result.insertId]);
