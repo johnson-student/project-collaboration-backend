@@ -1,29 +1,33 @@
-const mysql = require("mysql2/promise");
+const { Sequelize } = require("sequelize");
 require("dotenv").config();
 
-const pool = mysql.createPool({
-  host:               process.env.DB_HOST     || "localhost",
-  port:               Number(process.env.DB_PORT) || 3306,
-  user:               process.env.DB_USER     || "root",
-  password:           process.env.DB_PASSWORD || "",
-  database:           process.env.DB_NAME     || "collabflow",
-  waitForConnections: true,
-  connectionLimit:    10,
-  queueLimit:         0,
-  timezone:           "Z",
-  dateStrings:        false,
-  charset:            "utf8mb4",
-});
+const sequelize = new Sequelize(
+  process.env.DB_NAME || "collabflow",
+  process.env.DB_USER || "root",
+  process.env.DB_PASSWORD || "",
+  {
+    host: process.env.DB_HOST || "localhost",
+    port: Number(process.env.DB_PORT) || 3306,
+    dialect: "mysql",
+    timezone: "+00:00",
+    logging: false,
+    pool: { max: 10, min: 0, acquire: 30000, idle: 10000 },
+    define: {
+      underscored: true,
+      freezeTableName: true,
+      charset: "utf8mb4",
+      collate: "utf8mb4_unicode_ci",
+    },
+  },
+);
 
 // Test connection on startup
-pool.getConnection()
-  .then((conn) => {
-    console.log("✅  MySQL connected");
-    conn.release();
-  })
+sequelize
+  .authenticate()
+  .then(() => console.log("✅  MySQL connected (Sequelize)"))
   .catch((err) => {
     console.error("❌  MySQL connection failed:", err.message);
     process.exit(1);
   });
 
-module.exports = pool;
+module.exports = sequelize;

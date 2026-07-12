@@ -1,4 +1,4 @@
-const db = require("../config/db");
+const { aiRepository, projectRepository, taskRepository } = require("../repositories");
 const { ok, noContent, fail } = require("../utils/response");
 const { asyncHandler } = require("../middleware/error.middleware");
 const { callGemini } = require("../utils/gemini");
@@ -134,10 +134,7 @@ const runUpdateProject = async (args, { projectId, user, projectRole }) => {
   const keys = Object.keys(fields);
   if (!keys.length) return { success: false, error: "No valid fields to update were provided" };
 
-  await db.query(
-    `UPDATE projects SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE id = ?`,
-    [...keys.map((k) => fields[k]), projectId],
-  );
+  await projectRepository.updateById(projectId, fields);
   logActivity({
     projectId,
     userId: user.id,
@@ -150,10 +147,7 @@ const runUpdateProject = async (args, { projectId, user, projectRole }) => {
 const runCreateSubtasks = async (args, { projectId }) => {
   const taskId = Number(args.taskId);
   if (!Number.isInteger(taskId)) return { success: false, error: "taskId must be a task id number from the EXISTING TASKS list" };
-  const [[task]] = await db.query(
-    "SELECT id, title FROM tasks WHERE id = ? AND project_id = ?",
-    [taskId, projectId],
-  );
+  const task = await taskRepository.findInProject(taskId, projectId);
   if (!task) return { success: false, error: `Task #${taskId} was not found in this project` };
 
   const subtasks = (Array.isArray(args.subtasks) ? args.subtasks : [])
@@ -166,17 +160,16 @@ const runCreateSubtasks = async (args, { projectId }) => {
     }));
   if (!subtasks.length) return { success: false, error: "No valid subtasks were provided" };
 
-  const [[{ maxPos }]] = await db.query(
-    "SELECT COALESCE(MAX(position),0) AS maxPos FROM subtasks WHERE task_id = ?",
-    [taskId],
-  );
-  let position = Number(maxPos);
+  let position = (await taskRepository.maxSubtaskPosition(taskId)) || 0;
   for (const s of subtasks) {
     position += 1;
-    await db.query(
-      "INSERT INTO subtasks (task_id, title, description, priority, position) VALUES (?,?,?,?,?)",
-      [taskId, s.title, s.description, s.priority, position],
-    );
+    await taskRepository.createSubtask({
+      task_id: taskId,
+      title: s.title,
+      description: s.description,
+      priority: s.priority,
+      position,
+    });
   }
   return {
     success: true,
@@ -193,15 +186,12 @@ const runAssignTask = async (args, { projectId, user }) => {
   if (!Number.isInteger(assigneeId) || assigneeId < 0)
     return { success: false, error: "assigneeId must be a user id from the TEAM list, or 0 to unassign" };
 
-  const [[task]] = await db.query(
-    "SELECT id, title, assignee_id FROM tasks WHERE id = ? AND project_id = ?",
-    [taskId, projectId],
-  );
+  const task = await taskRepository.findInProject(taskId, projectId);
   if (!task) return { success: false, error: `Task #${taskId} was not found in this project` };
 
   if (assigneeId === 0) {
     if (task.assignee_id === null) return { success: false, error: `Task "${task.title}" is already unassigned` };
-    await db.query("UPDATE tasks SET assignee_id = NULL WHERE id = ?", [taskId]);
+    await taskRepository.updateById(taskId, { assignee_id: null });
     logActivity({
       projectId,
       userId: user.id,
@@ -212,18 +202,14 @@ const runAssignTask = async (args, { projectId, user }) => {
     return { success: true, taskId, taskTitle: task.title, assignee: null };
   }
 
-  const [[assignee]] = await db.query(
-    `SELECT u.id, u.name FROM project_members pm
-     JOIN users u ON u.id = pm.user_id
-     WHERE pm.project_id = ? AND pm.user_id = ?`,
-    [projectId, assigneeId],
-  );
+  const membership = await projectRepository.findMembershipWithUser(projectId, assigneeId, ["id", "name"]);
+  const assignee = membership?.user;
   if (!assignee)
     return { success: false, error: `User id ${assigneeId} is not a member of this project — use a user id from the TEAM list` };
   if (task.assignee_id === assignee.id)
     return { success: false, error: `Task "${task.title}" is already assigned to ${assignee.name}` };
 
-  await db.query("UPDATE tasks SET assignee_id = ? WHERE id = ?", [assigneeId, taskId]);
+  await taskRepository.updateById(taskId, { assignee_id: assigneeId });
 
   if (assigneeId !== user.id) {
     await createNotification({
@@ -252,25 +238,28 @@ const TOOL_RUNNERS = {
 
 // ── Context gathering ────────────────────────────────────────────────────
 const buildProjectContext = async (projectId) => {
-  const [[project]] = await db.query(
-    `SELECT name, description, status, priority, category, deadline, progress
-     FROM projects WHERE id = ?`,
-    [projectId],
-  );
-  const [members] = await db.query(
-    `SELECT u.id, u.name, pm.role FROM project_members pm
-     JOIN users u ON u.id = pm.user_id WHERE pm.project_id = ?`,
-    [projectId],
-  );
-  const [tasks] = await db.query(
-    `SELECT t.id, t.title, t.status, t.priority, u.name AS assignee_name,
-            COUNT(s.id) AS subtask_count
-     FROM tasks t
-     LEFT JOIN subtasks s ON s.task_id = t.id
-     LEFT JOIN users u ON u.id = t.assignee_id
-     WHERE t.project_id = ? GROUP BY t.id ORDER BY t.created_at DESC LIMIT 100`,
-    [projectId],
-  );
+  const project = await projectRepository.findById(projectId, {
+    attributes: ["name", "description", "status", "priority", "category", "deadline", "progress"],
+    raw: true,
+  });
+  const memberships = await projectRepository.findMembershipsByProject(projectId, {
+    userAttributes: ["id", "name"],
+  });
+  const members = memberships.map((m) => ({ id: m.user.id, name: m.user.name, role: m.role }));
+
+  const taskRows = await taskRepository.listByProject(projectId, {
+    order: [["created_at", "DESC"]],
+    limit: 100,
+  });
+  const subtaskCounts = await taskRepository.subtaskCountsByTasks(taskRows.map((t) => t.id));
+  const tasks = taskRows.map((t) => ({
+    id: t.id,
+    title: t.title,
+    status: t.status,
+    priority: t.priority,
+    assignee_name: t.assignee?.name ?? null,
+    subtask_count: subtaskCounts[t.id]?.total || 0,
+  }));
   return { project, members, tasks };
 };
 
@@ -370,23 +359,18 @@ const historyText = (m) => {
 };
 
 // ── Persistence helpers ──────────────────────────────────────────────────
-const saveMessage = async (projectId, userId, role, messageType, content) => {
-  const [result] = await db.query(
-    `INSERT INTO ai_messages (project_id, user_id, role, message_type, content)
-     VALUES (?,?,?,?,?)`,
-    [projectId, userId, role, messageType, content],
-  );
-  const [[row]] = await db.query("SELECT * FROM ai_messages WHERE id = ?", [result.insertId]);
-  return row;
-};
+const saveMessage = (projectId, userId, role, messageType, content) =>
+  aiRepository.create({
+    project_id: projectId,
+    user_id: userId,
+    role,
+    message_type: messageType,
+    content,
+  });
 
 // ── GET /api/projects/:id/ai/messages ────────────────────────────────────
 const getAiMessages = asyncHandler(async (req, res) => {
-  const [rows] = await db.query(
-    `SELECT * FROM ai_messages WHERE project_id = ? AND user_id = ?
-     ORDER BY id ASC LIMIT 200`,
-    [req.params.id, req.user.id],
-  );
+  const rows = await aiRepository.listByProjectAndUser(req.params.id, req.user.id, 200);
   ok(res, rows);
 });
 
@@ -401,11 +385,7 @@ const sendAiMessage = asyncHandler(async (req, res) => {
   const isGenerate = message.toLowerCase().startsWith(GENERATE_COMMAND);
 
   // History is read before inserting the new message so it isn't doubled.
-  const [historyDesc] = await db.query(
-    `SELECT role, message_type, content FROM ai_messages
-     WHERE project_id = ? AND user_id = ? ORDER BY id DESC LIMIT ?`,
-    [projectId, req.user.id, HISTORY_LIMIT],
-  );
+  const historyDesc = await aiRepository.listRecent(projectId, req.user.id, HISTORY_LIMIT);
   const contents = historyDesc
     .reverse()
     .map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: historyText(m) }] }));
@@ -459,10 +439,7 @@ const sendAiMessage = asyncHandler(async (req, res) => {
 
 // ── DELETE /api/projects/:id/ai/messages ─────────────────────────────────
 const clearAiMessages = asyncHandler(async (req, res) => {
-  await db.query("DELETE FROM ai_messages WHERE project_id = ? AND user_id = ?", [
-    req.params.id,
-    req.user.id,
-  ]);
+  await aiRepository.clearByProjectAndUser(req.params.id, req.user.id);
   noContent(res);
 });
 

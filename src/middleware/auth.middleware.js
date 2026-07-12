@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const db  = require("../config/db");
+const { userRepository, projectRepository } = require("../repositories");
 
 const signAccess  = (p) => jwt.sign(p, process.env.JWT_SECRET,         { expiresIn: process.env.JWT_EXPIRES_IN         || "15m" });
 const signRefresh = (p) => jwt.sign(p, process.env.JWT_REFRESH_SECRET, { expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || "7d"  });
@@ -12,12 +12,11 @@ const protect = async (req, res, next) => {
     let decoded;
     try { decoded = jwt.verify(token, process.env.JWT_SECRET); }
     catch(err) { return res.status(401).json({ success:false, message: err.name==="TokenExpiredError"?"Token expired":"Invalid token" }); }
-    const [rows] = await db.query(
-      "SELECT id,name,email,role,avatar,initials,color,status FROM users WHERE id=?",
-      [decoded.id]
-    );
-    if (!rows.length) return res.status(401).json({ success:false, message:"User not found" });
-    req.user = rows[0];
+    const user = await userRepository.findById(decoded.id, {
+      attributes: ["id", "name", "email", "role", "avatar", "initials", "color", "status"],
+    });
+    if (!user) return res.status(401).json({ success:false, message:"User not found" });
+    req.user = user.get({ plain: true });
     next();
   } catch(err) { next(err); }
 };
@@ -27,12 +26,9 @@ const protect = async (req, res, next) => {
 const requireProjectMember = async (req, res, next) => {
   try {
     const projectId = req.params.id || req.params.projectId;
-    const [rows] = await db.query(
-      "SELECT role FROM project_members WHERE project_id=? AND user_id=?",
-      [projectId, req.user.id]
-    );
-    if (!rows.length) return res.status(403).json({ success:false, message:"Access denied — not a project member" });
-    req.projectRole = rows[0].role;
+    const membership = await projectRepository.findMembership(projectId, req.user.id);
+    if (!membership) return res.status(403).json({ success:false, message:"Access denied — not a project member" });
+    req.projectRole = membership.role;
     next();
   } catch(err) { next(err); }
 };

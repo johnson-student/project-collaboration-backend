@@ -1,21 +1,21 @@
 // Idempotent schema migrations — safe to run multiple times.
 // Usage: npm run db:migrate
-const db = require("./db");
+const sequelize = require("./db");
 
 const tableExists = async (table) => {
-  const [rows] = await db.query(
+  const [rows] = await sequelize.query(
     `SELECT COUNT(*) AS cnt FROM information_schema.TABLES
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
-    [table],
+    { replacements: [table] },
   );
   return rows[0].cnt > 0;
 };
 
 const columnExists = async (table, column) => {
-  const [rows] = await db.query(
+  const [rows] = await sequelize.query(
     `SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
-    [table, column],
+    { replacements: [table, column] },
   );
   return rows[0].cnt > 0;
 };
@@ -23,22 +23,22 @@ const columnExists = async (table, column) => {
 const migrate = async () => {
   // ── Email verification columns ──────────────────────────────────────
   if (!(await columnExists("users", "email_verified"))) {
-    await db.query(
+    await sequelize.query(
       "ALTER TABLE users ADD COLUMN email_verified TINYINT(1) NOT NULL DEFAULT 0 AFTER status",
     );
     // Grandfather accounts that existed before this feature so they
     // are not locked out of login.
-    await db.query("UPDATE users SET email_verified = 1");
+    await sequelize.query("UPDATE users SET email_verified = 1");
     console.log("✅  Added users.email_verified (existing users marked verified)");
   }
   if (!(await columnExists("users", "verify_token"))) {
-    await db.query(
+    await sequelize.query(
       "ALTER TABLE users ADD COLUMN verify_token VARCHAR(255) NULL DEFAULT NULL AFTER email_verified, ADD INDEX idx_users_verify_token (verify_token)",
     );
     console.log("✅  Added users.verify_token");
   }
   if (!(await columnExists("users", "verify_token_expires"))) {
-    await db.query(
+    await sequelize.query(
       "ALTER TABLE users ADD COLUMN verify_token_expires DATETIME NULL DEFAULT NULL AFTER verify_token",
     );
     console.log("✅  Added users.verify_token_expires");
@@ -46,7 +46,7 @@ const migrate = async () => {
 
   // ── Chat attachments ────────────────────────────────────────────────
   if (!(await columnExists("project_messages", "attachment_id"))) {
-    await db.query(
+    await sequelize.query(
       `ALTER TABLE project_messages
          ADD COLUMN attachment_id INT UNSIGNED NULL DEFAULT NULL AFTER body,
          ADD INDEX idx_pmsg_attachment (attachment_id),
@@ -58,7 +58,7 @@ const migrate = async () => {
 
   // ── AI assistant chat history ───────────────────────────────────────
   if (!(await tableExists("ai_messages"))) {
-    await db.query(
+    await sequelize.query(
       `CREATE TABLE ai_messages (
          id            INT UNSIGNED  NOT NULL AUTO_INCREMENT,
          project_id    INT UNSIGNED  NOT NULL,

@@ -1,6 +1,6 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
-const db = require("../config/db");
+const { userRepository, projectRepository } = require("../repositories");
 
 let io = null;
 
@@ -26,19 +26,17 @@ function initSocket(httpServer) {
 
       let decoded;
       try {
-        
         decoded = jwt.verify(token, process.env.JWT_SECRET);
       } catch (err) {
         return next(new Error("Invalid or expired token"));
       }
 
-      const [rows] = await db.query(
-        "SELECT id, name, email, initials, color, avatar FROM users WHERE id = ?",
-        [decoded.id]
-      );
-      if (!rows.length) return next(new Error("User not found"));
+      const user = await userRepository.findById(decoded.id, {
+        attributes: ["id", "name", "email", "initials", "color", "avatar"],
+      });
+      if (!user) return next(new Error("User not found"));
 
-      socket.user = rows[0];
+      socket.user = user.get({ plain: true });
       next();
     } catch (err) {
       next(new Error("Authentication failed"));
@@ -53,11 +51,8 @@ function initSocket(httpServer) {
     // ── Join a project room (verifies membership server-side) ──
     socket.on("project:join", async (projectId, ack) => {
       try {
-        const [rows] = await db.query(
-          "SELECT 1 FROM project_members WHERE project_id = ? AND user_id = ?",
-          [projectId, socket.user.id]
-        );
-        if (!rows.length) {
+        const membership = await projectRepository.findMembership(projectId, socket.user.id);
+        if (!membership) {
           return ack?.({ ok: false, error: "Not a member of this project" });
         }
         socket.join(`project:${projectId}`);

@@ -1,4 +1,4 @@
-const db = require("../config/db");
+const { activityRepository } = require("../repositories");
 const { ok } = require("../utils/response");
 const { asyncHandler } = require("../middleware/error.middleware");
 
@@ -7,16 +7,22 @@ const getProjectActivity = asyncHandler(async (req, res) => {
   const { page = 1, limit = 50 } = req.query;
   const offset = (Number(page) - 1) * Number(limit);
 
-  const [rows] = await db.query(
-    `SELECT al.*, u.name AS user_name, u.initials, u.color, u.avatar
-     FROM activity_logs al
-     LEFT JOIN users u ON u.id = al.user_id
-     WHERE al.project_id = ?
-     ORDER BY al.created_at DESC
-     LIMIT ? OFFSET ?`,
-    [req.params.id, Number(limit), offset]
-  );
-  ok(res, rows);
+  const rows = await activityRepository.listByProject(req.params.id, {
+    limit: Number(limit),
+    offset,
+  });
+
+  const data = rows.map((row) => {
+    const { user, ...activity } = row.get({ plain: true });
+    return {
+      ...activity,
+      user_name: user?.name ?? null,
+      initials: user?.initials ?? null,
+      color: user?.color ?? null,
+      avatar: user?.avatar ?? null,
+    };
+  });
+  ok(res, data);
 });
 
 module.exports = { getProjectActivity };

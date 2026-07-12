@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "db:migrate": "node src/config/migrate.js"
+    "db:migrate": "node src/config/migrate.js",
+    "db:backup": "node scripts/db-backup.js",
+    "db:restore": "node scripts/db-restore.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -23,6 +25,7 @@
     "multer": "^1.4.5-lts.1",
     "mysql2": "^3.11.0",
     "nodemailer": "^9.0.3",
+    "sequelize": "^6.37.7",
     "socket.io": "^4.8.3",
     "uuid": "^10.0.0"
   },

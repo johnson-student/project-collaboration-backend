@@ -1,6 +1,6 @@
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
-const db = require("../config/db");
+const { userRepository } = require("../repositories");
 const { ok, created, fail } = require("../utils/response");
 const { asyncHandler } = require("../middleware/error.middleware");
 const { signAccess, signRefresh } = require("../middleware/auth.middleware");
@@ -77,10 +77,10 @@ const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const issueVerificationToken = async (userId) => {
   const token = crypto.randomBytes(32).toString("hex");
   const expires = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
-  await db.query(
-    "UPDATE users SET verify_token = ?, verify_token_expires = ? WHERE id = ?",
-    [token, expires, userId],
-  );
+  await userRepository.updateById(userId, {
+    verify_token: token,
+    verify_token_expires: expires,
+  });
   return token;
 };
 
@@ -95,22 +95,24 @@ const register = asyncHandler(async (req, res) => {
   if (password.length < 8)
     return fail(res, "Password must be at least 8 characters", 400);
 
-  const [existing] = await db.query("SELECT id FROM users WHERE email = ?", [
-    email.toLowerCase(),
-  ]);
-  if (existing.length) return fail(res, "Email already registered", 409);
+  const existing = await userRepository.findByEmail(email.toLowerCase());
+  if (existing) return fail(res, "Email already registered", 409);
 
   const hash = await bcrypt.hash(password, 12);
   const initials = generateInitials(name);
   const color = COLORS[Math.floor(Math.random() * COLORS.length)];
 
-  const [result] = await db.query(
-    `INSERT INTO users (name, email, password_hash, initials, color, status, email_verified)
-     VALUES (?,?,?,?,?,'Active',0)`,
-    [name.trim(), email.toLowerCase(), hash, initials, color],
-  );
+  const user = await userRepository.create({
+    name: name.trim(),
+    email: email.toLowerCase(),
+    password_hash: hash,
+    initials,
+    color,
+    status: "Active",
+    email_verified: false,
+  });
 
-  const token = await issueVerificationToken(result.insertId);
+  const token = await issueVerificationToken(user.id);
   try {
     await sendVerificationEmail(email.toLowerCase(), name.trim(), buildVerifyUrl(token));
   } catch (err) {
@@ -130,12 +132,9 @@ const login = asyncHandler(async (req, res) => {
   if (!email || !password)
     return fail(res, "Email and password are required", 400);
 
-  const [rows] = await db.query("SELECT * FROM users WHERE email = ?", [
-    email.toLowerCase(),
-  ]);
-  if (!rows.length) return fail(res, "Invalid credentials", 401);
+  const user = await userRepository.findByEmail(email.toLowerCase());
+  if (!user) return fail(res, "Invalid credentials", 401);
 
-  const user = rows[0];
   const match = await bcrypt.compare(password, user.password_hash);
   if (!match) return fail(res, "Invalid credentials", 401);
 
@@ -149,10 +148,11 @@ const login = asyncHandler(async (req, res) => {
   const accessToken = signAccess({ id: user.id });
   const refreshToken = signRefresh({ id: user.id });
   const hashedRefresh = await bcrypt.hash(refreshToken, 8);
-  await db.query(
-    "UPDATE users SET refresh_token = ?, status = 'Active' WHERE id = ?",
-    [hashedRefresh, user.id],
-  );
+  await userRepository.updateById(user.id, {
+    refresh_token: hashedRefresh,
+    status: "Active",
+  });
+  user.status = "Active";
 
   setRefreshCookie(res, refreshToken);
   ok(res, { user: safeUser(user), accessToken });
@@ -171,12 +171,9 @@ const refresh = asyncHandler(async (req, res) => {
     return fail(res, "Invalid or expired refresh token", 401);
   }
 
-  const [rows] = await db.query("SELECT * FROM users WHERE id = ?", [
-    decoded.id,
-  ]);
-  if (!rows.length) return fail(res, "User not found", 401);
+  const user = await userRepository.findById(decoded.id);
+  if (!user) return fail(res, "User not found", 401);
 
-  const user = rows[0];
   const valid =
     user.refresh_token &&
     (await bcrypt.compare(refreshToken, user.refresh_token));
@@ -185,10 +182,7 @@ const refresh = asyncHandler(async (req, res) => {
   const newAccess = signAccess({ id: user.id });
   const newRefresh = signRefresh({ id: user.id });
   const hashed = await bcrypt.hash(newRefresh, 8);
-  await db.query("UPDATE users SET refresh_token = ? WHERE id = ?", [
-    hashed,
-    user.id,
-  ]);
+  await userRepository.updateById(user.id, { refresh_token: hashed });
 
   setRefreshCookie(res, newRefresh);
   ok(res, { accessToken: newAccess });
@@ -197,37 +191,32 @@ const refresh = asyncHandler(async (req, res) => {
 // ── POST /api/auth/logout ────────────────────────────────────────────────
 const logout = asyncHandler(async (req, res) => {
   // req.user attached by protect middleware
-  await db.query("UPDATE users SET refresh_token = NULL WHERE id = ?", [
-    req.user.id,
-  ]);
+  await userRepository.updateById(req.user.id, { refresh_token: null });
   clearRefreshCookie(res);
   ok(res, null, "Logged out");
 });
 
 // ── GET /api/auth/me ─────────────────────────────────────────────────────
 const getMe = asyncHandler(async (req, res) => {
-  const [rows] = await db.query(
-    "SELECT id,name,email,role,avatar,initials,color,status,joined_at FROM users WHERE id = ?",
-    [req.user.id],
-  );
-  if (!rows.length) return fail(res, "User not found", 404);
-  ok(res, rows[0]);
+  const user = await userRepository.findById(req.user.id, {
+    attributes: ["id", "name", "email", "role", "avatar", "initials", "color", "status", "joined_at"],
+  });
+  if (!user) return fail(res, "User not found", 404);
+  ok(res, user);
 });
 
 // ── POST /api/auth/forgot-password ──────────────────────────────────────
 const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
   // Always return 200 to prevent email enumeration
-  const [rows] = await db.query("SELECT id FROM users WHERE email = ?", [
-    email?.toLowerCase(),
-  ]);
-  if (rows.length) {
+  const user = await userRepository.findByEmail(email?.toLowerCase() || "");
+  if (user) {
     const token = crypto.randomBytes(32).toString("hex");
     const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-    await db.query(
-      "UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?",
-      [token, expires, rows[0].id],
-    );
+    await userRepository.updateById(user.id, {
+      reset_token: token,
+      reset_token_expires: expires,
+    });
     // In production: sendPasswordResetEmail(email, token)
     console.info(`[password-reset] token for ${email}: ${token}`);
   }
@@ -242,18 +231,17 @@ const resetPassword = asyncHandler(async (req, res) => {
   if (password.length < 8)
     return fail(res, "Password must be at least 8 characters", 400);
 
-  const [rows] = await db.query(
-    "SELECT id FROM users WHERE reset_token = ? AND reset_token_expires > NOW()",
-    [token],
-  );
-  if (!rows.length)
+  const user = await userRepository.findByValidResetToken(token);
+  if (!user)
     return fail(res, "Reset token is invalid or has expired", 400);
 
   const hash = await bcrypt.hash(password, 12);
-  await db.query(
-    "UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL, refresh_token = NULL WHERE id = ?",
-    [hash, rows[0].id],
-  );
+  await userRepository.updateById(user.id, {
+    password_hash: hash,
+    reset_token: null,
+    reset_token_expires: null,
+    refresh_token: null,
+  });
   clearRefreshCookie(res);
   ok(res, null, "Password reset successfully — please sign in again");
 });
@@ -263,17 +251,15 @@ const verifyEmail = asyncHandler(async (req, res) => {
   const { token } = req.body;
   if (!token) return fail(res, "Verification token is required", 400);
 
-  const [rows] = await db.query(
-    "SELECT id, email_verified FROM users WHERE verify_token = ? AND verify_token_expires > NOW()",
-    [token],
-  );
-  if (!rows.length)
+  const user = await userRepository.findByValidVerifyToken(token);
+  if (!user)
     return fail(res, "Verification link is invalid or has expired", 400);
 
-  await db.query(
-    "UPDATE users SET email_verified = 1, verify_token = NULL, verify_token_expires = NULL WHERE id = ?",
-    [rows[0].id],
-  );
+  await userRepository.updateById(user.id, {
+    email_verified: true,
+    verify_token: null,
+    verify_token_expires: null,
+  });
   ok(res, null, "Email verified successfully — you can now sign in");
 });
 
@@ -281,14 +267,11 @@ const verifyEmail = asyncHandler(async (req, res) => {
 const resendVerification = asyncHandler(async (req, res) => {
   const { email } = req.body;
   // Always return 200 to prevent email enumeration
-  const [rows] = await db.query(
-    "SELECT id, name, email_verified FROM users WHERE email = ?",
-    [email?.toLowerCase()],
-  );
-  if (rows.length && !rows[0].email_verified) {
-    const token = await issueVerificationToken(rows[0].id);
+  const user = await userRepository.findByEmail(email?.toLowerCase() || "");
+  if (user && !user.email_verified) {
+    const token = await issueVerificationToken(user.id);
     try {
-      await sendVerificationEmail(email.toLowerCase(), rows[0].name, buildVerifyUrl(token));
+      await sendVerificationEmail(email.toLowerCase(), user.name, buildVerifyUrl(token));
     } catch (err) {
       console.error("[email] failed to send verification email:", err.message);
     }

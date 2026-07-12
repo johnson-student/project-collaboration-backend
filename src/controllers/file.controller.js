@@ -1,9 +1,19 @@
-const db   = require("../config/db");
 const path = require("path");
 const fs   = require("fs");
+const { fileRepository } = require("../repositories");
 const { ok, created, fail, noContent } = require("../utils/response");
 const { asyncHandler } = require("../middleware/error.middleware");
 const { logActivity } = require("../utils/activity");
+
+const serializeFile = (row) => {
+  const { uploader, ...file } = row.get({ plain: true });
+  return {
+    ...file,
+    uploader_name: uploader.name,
+    uploader_initials: uploader.initials,
+    uploader_color: uploader.color,
+  };
+};
 
 // ── POST /api/projects/:id/files ─────────────────────────────────────────
 const uploadFile = asyncHandler(async (req, res) => {
@@ -12,48 +22,38 @@ const uploadFile = asyncHandler(async (req, res) => {
   const projectId = req.params.id;
   const { originalname, filename, mimetype, size } = req.file;
 
-  const [result] = await db.query(
-    "INSERT INTO project_files (project_id, uploader_id, original_name, stored_name, mime_type, size_bytes) VALUES (?,?,?,?,?,?)",
-    [projectId, req.user.id, originalname, filename, mimetype, size]
-  );
+  const file = await fileRepository.create({
+    project_id: projectId,
+    uploader_id: req.user.id,
+    original_name: originalname,
+    stored_name: filename,
+    mime_type: mimetype,
+    size_bytes: size,
+  });
 
   await logActivity({
     projectId,
     userId: req.user.id,
     eventType: "file_uploaded",
     description: `${req.user.name} uploaded "${originalname}"`,
-    meta: { file_id: result.insertId, file_name: originalname },
+    meta: { file_id: file.id, file_name: originalname },
   });
 
-  const [rows] = await db.query(
-    `SELECT pf.*, u.name AS uploader_name, u.initials AS uploader_initials, u.color AS uploader_color
-     FROM project_files pf JOIN users u ON u.id = pf.uploader_id WHERE pf.id = ?`,
-    [result.insertId]
-  );
-  created(res, rows[0], "File uploaded");
+  const row = await fileRepository.findByIdWithUploader(file.id);
+  created(res, serializeFile(row), "File uploaded");
 });
 
 // ── GET /api/projects/:id/files ──────────────────────────────────────────
 const getProjectFiles = asyncHandler(async (req, res) => {
-  const [rows] = await db.query(
-    `SELECT pf.*, u.name AS uploader_name, u.initials AS uploader_initials, u.color AS uploader_color
-     FROM project_files pf JOIN users u ON u.id = pf.uploader_id
-     WHERE pf.project_id = ?
-     ORDER BY pf.created_at DESC`,
-    [req.params.id]
-  );
-  ok(res, rows);
+  const rows = await fileRepository.listByProject(req.params.id);
+  ok(res, rows.map(serializeFile));
 });
 
 // ── GET /api/projects/:id/files/:fileId/download ─────────────────────────
 const downloadFile = asyncHandler(async (req, res) => {
-  const [rows] = await db.query(
-    "SELECT * FROM project_files WHERE id = ? AND project_id = ?",
-    [req.params.fileId, req.params.id]
-  );
-  if (!rows.length) return fail(res, "File not found", 404);
+  const file = await fileRepository.findInProject(req.params.fileId, req.params.id);
+  if (!file) return fail(res, "File not found", 404);
 
-  const file = rows[0];
   const filePath = path.join(__dirname, "../../uploads/project-files", file.stored_name);
   if (!fs.existsSync(filePath)) return fail(res, "File not found on disk", 404);
 
@@ -63,12 +63,8 @@ const downloadFile = asyncHandler(async (req, res) => {
 // ── DELETE /api/projects/:id/files/:fileId ───────────────────────────────
 const deleteFile = asyncHandler(async (req, res) => {
   const projectId = req.params.id;
-  const [rows] = await db.query(
-    "SELECT * FROM project_files WHERE id = ? AND project_id = ?",
-    [req.params.fileId, projectId]
-  );
-  if (!rows.length) return fail(res, "File not found", 404);
-  const file = rows[0];
+  const file = await fileRepository.findInProject(req.params.fileId, projectId);
+  if (!file) return fail(res, "File not found", 404);
 
   // Only uploader, Owner, or Admin can delete
   const isUploader = file.uploader_id === req.user.id;
@@ -79,7 +75,7 @@ const deleteFile = asyncHandler(async (req, res) => {
   const filePath = path.join(__dirname, "../../uploads/project-files", file.stored_name);
   if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
-  await db.query("DELETE FROM project_files WHERE id = ?", [file.id]);
+  await fileRepository.deleteById(file.id);
 
   await logActivity({
     projectId,
