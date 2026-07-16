@@ -11,6 +11,31 @@ CREATE DATABASE IF NOT EXISTS collabflow
 USE collabflow;
 
 -- ============================================================
+-- 0. DATABASE ACCOUNTS
+-- ============================================================
+-- Two accounts, matching what the code expects in .env:
+--   collabflow_app   -> DB_USER / DB_PASSWORD
+--       Runtime account for the API. Data access only — no ALTER/CREATE,
+--       so a compromised app cannot change the schema.
+--   collabflow_admin -> BACKUP_DB_USER / BACKUP_DB_PASSWORD
+--       Used by `npm run db:migrate` (DDL) and db-backup/db-restore.
+--
+-- ⚠️  CHANGE THE PLACEHOLDER PASSWORDS before running on a real host,
+--     and put the same values in .env. Host is '%' because the API
+--     connects to RDS over the network (RDS never sees 'localhost'
+--     clients); access is restricted by the RDS security group.
+
+CREATE USER IF NOT EXISTS 'collabflow_app'@'%'
+  IDENTIFIED BY 'collabflow_app123';
+GRANT SELECT, INSERT, UPDATE, DELETE ON collabflow.* TO 'collabflow_app'@'%';
+
+CREATE USER IF NOT EXISTS 'collabflow_admin'@'%'
+  IDENTIFIED BY 'collabflow_admin123';
+GRANT ALL PRIVILEGES ON collabflow.* TO 'collabflow_admin'@'%';
+
+FLUSH PRIVILEGES;
+
+-- ============================================================
 -- 1. USERS
 -- ============================================================
 CREATE TABLE users (
@@ -324,14 +349,15 @@ CREATE TABLE IF NOT EXISTS ai_messages (
 -- 10. SEED DATA
 -- ============================================================
 
--- Users (passwords are bcrypt of "password123")
-INSERT INTO users (id, name, email, password_hash, role, initials, color, status, joined_at) VALUES
-(1, 'Alex Rivera',    'alex.rivera@collabflow.io',   '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Product Manager',    'AR', '#6366f1', 'Active',  '2024-01-15'),
-(2, 'Sophia Chen',    'sophia.chen@collabflow.io',   '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Lead Designer',       'SC', '#8b5cf6', 'Active',  '2024-02-03'),
-(3, 'Marcus Williams','marcus.w@collabflow.io',      '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Senior Developer',    'MW', '#06b6d4', 'Away',    '2024-01-20'),
-(4, 'Priya Patel',    'priya.patel@collabflow.io',   '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Backend Engineer',    'PP', '#f59e0b', 'Offline', '2024-03-10'),
-(5, 'Jordan Kim',     'jordan.kim@collabflow.io',    '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Frontend Developer',  'JK', '#10b981', 'Active',  '2024-02-18'),
-(6, 'Elena Vasquez',  'elena.v@collabflow.io',       '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'QA Engineer',         'EV', '#ef4444', 'Active',  '2024-03-22');
+-- Users (passwords are bcrypt of "password123"; seeded accounts are
+-- pre-verified so they can log in without the email flow)
+INSERT INTO users (id, name, email, password_hash, role, initials, color, status, email_verified, joined_at) VALUES
+(1, 'Alex Rivera',    'alex.rivera@collabflow.io',   '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Product Manager',    'AR', '#6366f1', 'Active',  1, '2024-01-15'),
+(2, 'Sophia Chen',    'sophia.chen@collabflow.io',   '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Lead Designer',       'SC', '#8b5cf6', 'Active',  1, '2024-02-03'),
+(3, 'Marcus Williams','marcus.w@collabflow.io',      '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Senior Developer',    'MW', '#06b6d4', 'Away',    1, '2024-01-20'),
+(4, 'Priya Patel',    'priya.patel@collabflow.io',   '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Backend Engineer',    'PP', '#f59e0b', 'Offline', 1, '2024-03-10'),
+(5, 'Jordan Kim',     'jordan.kim@collabflow.io',    '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'Frontend Developer',  'JK', '#10b981', 'Active',  1, '2024-02-18'),
+(6, 'Elena Vasquez',  'elena.v@collabflow.io',       '$2a$12$KXEOa/3uMV.qHjr6g0N1.eZd2z3FnpzPjSR9mm2b3RYq5ar2j/7uG', 'QA Engineer',         'EV', '#ef4444', 'Active',  1, '2024-03-22');
  
 -- Projects
 INSERT INTO projects (id, name, description, status, priority, progress, deadline, color, icon, category, owner_id, created_at) VALUES

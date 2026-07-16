@@ -74,6 +74,141 @@ const migrate = async () => {
     console.log("✅  Added users.verify_token_expires");
   }
 
+  // ── Base tables added after the original schema ─────────────────────
+  // Databases created from an early schema.sql predate these entirely,
+  // so create them before trying to ALTER them. DDL matches schema.sql.
+  // Order matters: project_files before project_messages (attachment FK).
+  const baseTables = {
+    subtasks: `CREATE TABLE subtasks (
+      id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      task_id      INT UNSIGNED NOT NULL,
+      title        VARCHAR(300) NOT NULL,
+      description  TEXT NULL,
+      status       ENUM('Todo','In Progress','Done') NOT NULL DEFAULT 'Todo',
+      priority     ENUM('High','Medium','Low')        NOT NULL DEFAULT 'Medium',
+      due_date     DATE NULL,
+      position     INT UNSIGNED NOT NULL DEFAULT 0,
+      created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_subtasks_task     (task_id),
+      INDEX idx_subtasks_status   (status),
+      INDEX idx_subtasks_due_date (due_date),
+      CONSTRAINT fk_subtasks_task FOREIGN KEY (task_id)
+        REFERENCES tasks (id) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    notifications: `CREATE TABLE notifications (
+      id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id INT UNSIGNED NOT NULL,
+      type VARCHAR(60) NOT NULL,
+      title VARCHAR(200) NOT NULL,
+      message TEXT NOT NULL,
+      is_read TINYINT(1) NOT NULL DEFAULT 0,
+      action_url VARCHAR(500) NULL,
+      reference_id INT UNSIGNED NULL,
+      reference_type VARCHAR(60) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_notifications_user (user_id, is_read),
+      CONSTRAINT fk_notif_user FOREIGN KEY (user_id)
+        REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    project_invitations: `CREATE TABLE project_invitations (
+      id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      project_id   INT UNSIGNED NOT NULL,
+      inviter_id   INT UNSIGNED NOT NULL,
+      invitee_id   INT UNSIGNED NOT NULL,
+      role         ENUM('Admin','Member','Viewer') NOT NULL DEFAULT 'Member',
+      status       ENUM('Pending','Accepted','Rejected') NOT NULL DEFAULT 'Pending',
+      created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_pi (project_id, invitee_id),
+      INDEX idx_pi_invitee (invitee_id),
+      INDEX idx_pi_project (project_id),
+      INDEX idx_pi_status  (status),
+      CONSTRAINT fk_pi_project  FOREIGN KEY (project_id)  REFERENCES projects (id) ON DELETE CASCADE,
+      CONSTRAINT fk_pi_inviter  FOREIGN KEY (inviter_id)  REFERENCES users (id) ON DELETE CASCADE,
+      CONSTRAINT fk_pi_invitee  FOREIGN KEY (invitee_id)  REFERENCES users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    task_assignment_requests: `CREATE TABLE task_assignment_requests (
+      id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      task_id      INT UNSIGNED NOT NULL,
+      requester_id INT UNSIGNED NOT NULL,
+      assignee_id  INT UNSIGNED NOT NULL,
+      status       ENUM('Pending','Accepted','Rejected') NOT NULL DEFAULT 'Pending',
+      created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_tar_task     (task_id),
+      INDEX idx_tar_assignee (assignee_id),
+      INDEX idx_tar_status   (status),
+      CONSTRAINT fk_tar_task      FOREIGN KEY (task_id)      REFERENCES tasks (id) ON DELETE CASCADE,
+      CONSTRAINT fk_tar_requester FOREIGN KEY (requester_id) REFERENCES users (id) ON DELETE CASCADE,
+      CONSTRAINT fk_tar_assignee  FOREIGN KEY (assignee_id)  REFERENCES users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    project_files: `CREATE TABLE project_files (
+      id           INT UNSIGNED  NOT NULL AUTO_INCREMENT,
+      project_id   INT UNSIGNED  NOT NULL,
+      uploader_id  INT UNSIGNED  NOT NULL,
+      original_name VARCHAR(500) NOT NULL,
+      stored_name  VARCHAR(500)  NOT NULL,
+      mime_type    VARCHAR(200)  NOT NULL,
+      size_bytes   BIGINT UNSIGNED NOT NULL DEFAULT 0,
+      created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_pf_project  (project_id),
+      INDEX idx_pf_uploader (uploader_id),
+      CONSTRAINT fk_pf_project  FOREIGN KEY (project_id)  REFERENCES projects (id) ON DELETE CASCADE,
+      CONSTRAINT fk_pf_uploader FOREIGN KEY (uploader_id) REFERENCES users    (id) ON DELETE RESTRICT
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    activity_logs: `CREATE TABLE activity_logs (
+      id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      project_id   INT UNSIGNED NOT NULL,
+      user_id      INT UNSIGNED     NULL,
+      event_type   VARCHAR(60)  NOT NULL,
+      description  TEXT         NOT NULL,
+      meta         JSON             NULL,
+      created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_al_project (project_id),
+      INDEX idx_al_user    (user_id),
+      INDEX idx_al_created (created_at),
+      CONSTRAINT fk_al_project FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+      CONSTRAINT fk_al_user    FOREIGN KEY (user_id)    REFERENCES users    (id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    project_messages: `CREATE TABLE project_messages (
+      id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+      project_id   INT UNSIGNED NOT NULL,
+      user_id      INT UNSIGNED NOT NULL,
+      body         TEXT         NOT NULL,
+      attachment_id INT UNSIGNED    NULL DEFAULT NULL,
+      edited       TINYINT(1)   NOT NULL DEFAULT 0,
+      created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      INDEX idx_pmsg_project (project_id, created_at),
+      INDEX idx_pmsg_user    (user_id),
+      INDEX idx_pmsg_attachment (attachment_id),
+      CONSTRAINT fk_pmsg_project FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE,
+      CONSTRAINT fk_pmsg_user    FOREIGN KEY (user_id)    REFERENCES users    (id) ON DELETE CASCADE,
+      CONSTRAINT fk_pmsg_attachment FOREIGN KEY (attachment_id) REFERENCES project_files (id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  };
+
+  for (const [table, ddl] of Object.entries(baseTables)) {
+    if (!(await tableExists(table))) {
+      await sequelize.query(ddl);
+      console.log(`✅  Created ${table} table`);
+    }
+  }
+
   // ── Chat attachments ────────────────────────────────────────────────
   if (!(await columnExists("project_messages", "attachment_id"))) {
     await sequelize.query(
