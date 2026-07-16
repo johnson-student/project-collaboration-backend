@@ -1,5 +1,12 @@
 // Idempotent schema migrations — safe to run multiple times.
 // Usage: npm run db:migrate
+// The app account has no ALTER/CREATE rights, so migrations connect with
+// the admin account (BACKUP_DB_USER / BACKUP_DB_PASSWORD) when configured.
+require("dotenv").config();
+if (process.env.BACKUP_DB_USER) {
+  process.env.DB_USER = process.env.BACKUP_DB_USER;
+  process.env.DB_PASSWORD = process.env.BACKUP_DB_PASSWORD || "";
+}
 const sequelize = require("./db");
 
 const tableExists = async (table) => {
@@ -20,7 +27,30 @@ const columnExists = async (table, column) => {
   return rows[0].cnt > 0;
 };
 
+const fkDeleteRule = async (constraintName) => {
+  const [rows] = await sequelize.query(
+    `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
+     WHERE CONSTRAINT_SCHEMA = DATABASE() AND CONSTRAINT_NAME = ?`,
+    { replacements: [constraintName] },
+  );
+  return rows.length ? rows[0].DELETE_RULE : null;
+};
+
 const migrate = async () => {
+  // ── Tasks must be deleted with their project ────────────────────────
+  // The original FK was ON DELETE SET NULL, which turned a deleted
+  // project's tasks into orphans that kept showing up as "personal"
+  // tasks in My Tasks.
+  if ((await fkDeleteRule("fk_tasks_project")) === "SET NULL") {
+    await sequelize.query("ALTER TABLE tasks DROP FOREIGN KEY fk_tasks_project");
+    await sequelize.query(
+      `ALTER TABLE tasks
+         ADD CONSTRAINT fk_tasks_project FOREIGN KEY (project_id)
+           REFERENCES projects (id) ON DELETE CASCADE ON UPDATE CASCADE`,
+    );
+    console.log("✅  tasks.project_id now cascades on project delete");
+  }
+
   // ── Email verification columns ──────────────────────────────────────
   if (!(await columnExists("users", "email_verified"))) {
     await sequelize.query(

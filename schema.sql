@@ -112,7 +112,7 @@ CREATE TABLE tasks (
   INDEX idx_tasks_priority   (priority),
   INDEX idx_tasks_due_date   (due_date),
   CONSTRAINT fk_tasks_project  FOREIGN KEY (project_id)
-    REFERENCES projects (id) ON DELETE SET NULL ON UPDATE CASCADE,
+    REFERENCES projects (id) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT fk_tasks_assignee FOREIGN KEY (assignee_id)
     REFERENCES users (id) ON DELETE SET NULL ON UPDATE CASCADE,
   CONSTRAINT fk_tasks_reporter FOREIGN KEY (reporter_id)
