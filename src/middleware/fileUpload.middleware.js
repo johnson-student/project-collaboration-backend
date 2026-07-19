@@ -12,6 +12,7 @@ const ALLOWED_TYPES = [
   ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
   ".zip", ".rar", ".tar", ".gz",
   ".mp4", ".mp3", ".mov",
+  ".webm", ".m4a", ".ogg", ".wav",
 ];
 
 const MAX_SIZE = 50 * 1024 * 1024; // 50 MB
