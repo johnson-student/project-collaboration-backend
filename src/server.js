@@ -19,6 +19,9 @@ const { errorHandler }   = require("./middleware/error.middleware");
 const { initSocket }     = require("./socket");
 
 const app  = express();
+// Behind nginx — trust the first proxy hop so req.ip is the real client IP
+// (rate limiting and secure cookies break without this)
+app.set("trust proxy", 1);
 const httpServer = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 

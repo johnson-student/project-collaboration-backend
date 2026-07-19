@@ -9,10 +9,14 @@ const { sendVerificationEmail } = require("../utils/email");
 const REFRESH_COOKIE_NAME = "refreshToken";
 const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 
+const isProd = process.env.NODE_ENV === "production";
+
+// SameSite=None requires Secure, which browsers reject on plain-HTTP localhost —
+// use Lax in dev (localhost:5173 → localhost:3000 is same-site, so Lax works)
 const refreshCookieOptions = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === "production",
-  sameSite: "none",
+  secure: isProd,
+  sameSite: isProd ? "none" : "lax",
   path: "/api/auth",
   maxAge: REFRESH_COOKIE_MAX_AGE,
 };
