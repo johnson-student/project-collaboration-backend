@@ -27,6 +27,15 @@ const columnExists = async (table, column) => {
   return rows[0].cnt > 0;
 };
 
+const columnType = async (table, column) => {
+  const [rows] = await sequelize.query(
+    `SELECT COLUMN_TYPE AS t FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    { replacements: [table, column] },
+  );
+  return rows.length ? rows[0].t : null;
+};
+
 const fkDeleteRule = async (constraintName) => {
   const [rows] = await sequelize.query(
     `SELECT DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS
@@ -229,7 +238,7 @@ const migrate = async () => {
          project_id    INT UNSIGNED  NOT NULL,
          user_id       INT UNSIGNED  NOT NULL,
          role          ENUM('user','assistant') NOT NULL,
-         message_type  ENUM('text','tasks','clarification') NOT NULL DEFAULT 'text',
+         message_type  ENUM('text','tasks','clarification','analysis') NOT NULL DEFAULT 'text',
          content       MEDIUMTEXT    NOT NULL,
          created_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
          PRIMARY KEY (id),
@@ -239,6 +248,15 @@ const migrate = async () => {
        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
     );
     console.log("✅  Created ai_messages table");
+  }
+
+  // ── /analyze command stores a new structured message type ───────────
+  if (!String(await columnType("ai_messages", "message_type")).includes("'analysis'")) {
+    await sequelize.query(
+      `ALTER TABLE ai_messages
+         MODIFY message_type ENUM('text','tasks','clarification','analysis') NOT NULL DEFAULT 'text'`,
+    );
+    console.log("✅  ai_messages.message_type now allows 'analysis'");
   }
 
   console.log("✅  Migrations complete");

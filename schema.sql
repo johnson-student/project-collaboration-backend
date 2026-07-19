@@ -334,8 +334,8 @@ CREATE TABLE IF NOT EXISTS ai_messages (
   project_id    INT UNSIGNED NOT NULL,
   user_id       INT UNSIGNED NOT NULL,
   role          ENUM('user','assistant') NOT NULL,
-  message_type  ENUM('text','tasks','clarification') NOT NULL DEFAULT 'text',
-  content       MEDIUMTEXT   NOT NULL COMMENT 'Plain text, or JSON payload for tasks/clarification',
+  message_type  ENUM('text','tasks','clarification','analysis') NOT NULL DEFAULT 'text',
+  content       MEDIUMTEXT   NOT NULL COMMENT 'Plain text, or JSON payload for tasks/clarification/analysis',
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
   PRIMARY KEY (id),

@@ -266,7 +266,7 @@ const AiMessage = sequelize.define(
     user_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
     role: { type: DataTypes.ENUM("user", "assistant"), allowNull: false },
     message_type: {
-      type: DataTypes.ENUM("text", "tasks", "clarification"),
+      type: DataTypes.ENUM("text", "tasks", "clarification", "analysis"),
       allowNull: false,
       defaultValue: "text",
     },

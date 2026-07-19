@@ -6,8 +6,10 @@ const { logActivity } = require("../utils/activity");
 const { createNotification } = require("../utils/notification");
 
 const GENERATE_COMMAND = "/generate-task";
+const ANALYZE_COMMAND = "/analyze";
 const HISTORY_LIMIT = 20;
 const MAX_GENERATED_TASKS = 15;
+const MAX_ANALYSIS_ITEMS = 5;
 const MAX_MESSAGE_LENGTH = 4000;
 
 // Structured output contract for /generate-task: the model must either
@@ -36,6 +38,38 @@ const taskGenerationSchema = {
     questions: { type: "ARRAY", items: { type: "STRING" } },
   },
   required: ["type", "message"],
+};
+
+// Structured output contract for /analyze: a project health report the
+// client renders as a card — never free text.
+const HEALTH_RATINGS = ["On Track", "At Risk", "Off Track"];
+const projectAnalysisSchema = {
+  type: "OBJECT",
+  properties: {
+    message: {
+      type: "STRING",
+      description: "Short conversational reply shown in the chat above the analysis",
+    },
+    health: { type: "STRING", enum: HEALTH_RATINGS },
+    summary: {
+      type: "STRING",
+      description: "2-4 sentences on where the project stands and why",
+    },
+    risks: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          title: { type: "STRING" },
+          detail: { type: "STRING" },
+          severity: { type: "STRING", enum: ["High", "Medium", "Low"] },
+        },
+        required: ["title", "severity"],
+      },
+    },
+    recommendations: { type: "ARRAY", items: { type: "STRING" } },
+  },
+  required: ["message", "health", "summary"],
 };
 
 // ── Chat tools (Gemini function calling) ─────────────────────────────────
@@ -257,6 +291,7 @@ const buildProjectContext = async (projectId) => {
     title: t.title,
     status: t.status,
     priority: t.priority,
+    due_date: t.due_date,
     assignee_name: t.assignee?.name ?? null,
     subtask_count: subtaskCounts[t.id]?.total || 0,
   }));
@@ -274,7 +309,7 @@ TEAM (${members.length})
 ${members.map((m) => `- ${m.name} (${m.role}, user id ${m.id})`).join("\n") || "- (no members)"}
 
 EXISTING TASKS (${tasks.length})
-${tasks.map((t) => `- #${t.id} [${t.status}] ${t.title} (${t.priority}, ${t.assignee_name ? `assigned to ${t.assignee_name}` : "unassigned"}, ${Number(t.subtask_count) ? `${t.subtask_count} subtasks` : "no subtasks"})`).join("\n") || "- (no tasks yet)"}`;
+${tasks.map((t) => `- #${t.id} [${t.status}] ${t.title} (${t.priority}, ${t.due_date ? `due ${new Date(t.due_date).toISOString().slice(0, 10)}` : "no due date"}, ${t.assignee_name ? `assigned to ${t.assignee_name}` : "unassigned"}, ${Number(t.subtask_count) ? `${t.subtask_count} subtasks` : "no subtasks"})`).join("\n") || "- (no tasks yet)"}`;
 
 const chatSystemPrompt = (ctx) => `You are CollabFlow AI, a project management assistant embedded in the CollabFlow app. You are chatting with a member of the project described below. Help them understand, plan, and organize the project: answer questions, suggest priorities, break down work, spot risks.
 
@@ -287,6 +322,7 @@ Tool rules:
 - Never claim something was changed or created unless the tool call returned success. If it failed, tell the user exactly why.
 - After a successful call, briefly confirm what changed.
 - To create top-level project tasks, do NOT use tools — tell the user to type ${GENERATE_COMMAND}.
+- For a full structured health report of the project, tell the user to type ${ANALYZE_COMMAND}.
 
 Be concise and practical. Write plain conversational text only (short paragraphs or "-" bullet lists; no markdown headers, no tables, and NEVER raw JSON).
 
@@ -302,6 +338,17 @@ Decide between two responses:
 2. type "clarification" — when the description is empty or too vague to meet the rules above. Ask 2–4 short, concrete questions (e.g. about goals, tech stack, target users, deadline scope). Prefer this over guessing.
 
 "message" is always a short friendly sentence introducing the tasks or the questions.
+
+${contextBlock(ctx)}`;
+
+const analyzeSystemPrompt = (ctx) => `You are CollabFlow AI, a project management assistant. The user typed ${ANALYZE_COMMAND} to get a structured health analysis of the project described below. The conversation so far may contain extra context — use it. Today's date is ${new Date().toISOString().slice(0, 10)}.
+
+Produce:
+- health — "On Track", "At Risk", or "Off Track". Judge it from the data: progress vs deadline, overdue or stalled tasks, unassigned work, and how evenly work is spread — not gut feeling.
+- summary — 2–4 sentences on where the project stands and why you chose that rating.
+- risks — up to ${MAX_ANALYSIS_ITEMS} concrete risks, each grounded in the data below (e.g. a specific overdue task, one member carrying most High-priority work, nothing moved past Todo). Never invent generic risks that could apply to any project; leave the list empty if nothing stands out.
+- recommendations — up to ${MAX_ANALYSIS_ITEMS} short, specific actions the team can take now, tied to the risks or visible gaps. Reference tasks and members by name.
+- message — one short friendly sentence introducing the analysis.
 
 ${contextBlock(ctx)}`;
 
@@ -344,6 +391,37 @@ const normalizeGenerated = (raw) => {
   return null;
 };
 
+const normalizeAnalysis = (raw) => {
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+
+  if (!HEALTH_RATINGS.includes(parsed?.health)) return null;
+  const summary = String(parsed.summary || "").trim();
+  if (!summary) return null;
+
+  const risks = (Array.isArray(parsed.risks) ? parsed.risks : [])
+    .filter((r) => typeof r?.title === "string" && r.title.trim())
+    .slice(0, MAX_ANALYSIS_ITEMS)
+    .map((r) => ({
+      title: r.title.trim().slice(0, 300),
+      detail: String(r.detail || "").trim(),
+      severity: PRIORITIES.includes(r.severity) ? r.severity : "Medium",
+    }));
+  const recommendations = (Array.isArray(parsed.recommendations) ? parsed.recommendations : [])
+    .map((r) => String(r).trim())
+    .filter(Boolean)
+    .slice(0, MAX_ANALYSIS_ITEMS);
+
+  return {
+    type: "analysis",
+    message: String(parsed.message || "Here's my read on the project:").trim(),
+    health: parsed.health,
+    summary,
+    risks,
+    recommendations,
+  };
+};
+
 // Structured messages are stored as JSON; feed the model a readable summary
 // instead so it doesn't learn to reply with raw JSON in normal chat.
 const historyText = (m) => {
@@ -354,6 +432,8 @@ const historyText = (m) => {
       return `${p.message}\n(Suggested ${p.tasks.length} draft tasks: ${p.tasks.map((t) => t.title).join("; ")})`;
     if (p.type === "clarification")
       return `${p.message}\n${p.questions.map((q, i) => `${i + 1}. ${q}`).join("\n")}`;
+    if (p.type === "analysis")
+      return `${p.message}\nProject health: ${p.health}. ${p.summary}${p.risks.length ? `\nRisks: ${p.risks.map((r) => `${r.title} (${r.severity})`).join("; ")}` : ""}${p.recommendations.length ? `\nRecommendations: ${p.recommendations.join("; ")}` : ""}`;
   } catch { /* fall through to raw content */ }
   return m.content;
 };
@@ -383,6 +463,7 @@ const sendAiMessage = asyncHandler(async (req, res) => {
     return fail(res, `Message too long (max ${MAX_MESSAGE_LENGTH} characters)`);
 
   const isGenerate = message.toLowerCase().startsWith(GENERATE_COMMAND);
+  const isAnalyze = !isGenerate && message.toLowerCase().startsWith(ANALYZE_COMMAND);
 
   // History is read before inserting the new message so it isn't doubled.
   const historyDesc = await aiRepository.listRecent(projectId, req.user.id, HISTORY_LIMIT);
@@ -408,6 +489,17 @@ const sendAiMessage = asyncHandler(async (req, res) => {
         ? await saveMessage(projectId, req.user.id, "assistant", payload.type, JSON.stringify(payload))
         : await saveMessage(projectId, req.user.id, "assistant", "text",
             "Sorry — I couldn't produce a valid task list this time. Please try again, or add more detail about what you want.");
+    } else if (isAnalyze) {
+      const raw = await callGemini({
+        systemPrompt: analyzeSystemPrompt(ctx),
+        contents,
+        responseSchema: projectAnalysisSchema,
+      });
+      const payload = normalizeAnalysis(raw);
+      aiRow = payload
+        ? await saveMessage(projectId, req.user.id, "assistant", "analysis", JSON.stringify(payload))
+        : await saveMessage(projectId, req.user.id, "assistant", "text",
+            "Sorry — I couldn't produce a valid analysis this time. Please try again in a moment.");
     } else {
       const text = await callGemini({
         systemPrompt: chatSystemPrompt(ctx),
