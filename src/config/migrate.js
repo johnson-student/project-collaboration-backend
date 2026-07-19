@@ -218,6 +218,22 @@ const migrate = async () => {
     }
   }
 
+  // ── Notification reference columns ──────────────────────────────────
+  // Older databases have a notifications table that predates these
+  // columns, so the CREATE above was skipped and never added them.
+  if (!(await columnExists("notifications", "reference_id"))) {
+    await sequelize.query(
+      "ALTER TABLE notifications ADD COLUMN reference_id INT UNSIGNED NULL AFTER action_url",
+    );
+    console.log("✅  Added notifications.reference_id");
+  }
+  if (!(await columnExists("notifications", "reference_type"))) {
+    await sequelize.query(
+      "ALTER TABLE notifications ADD COLUMN reference_type VARCHAR(60) NULL AFTER reference_id",
+    );
+    console.log("✅  Added notifications.reference_type");
+  }
+
   // ── Chat attachments ────────────────────────────────────────────────
   if (!(await columnExists("project_messages", "attachment_id"))) {
     await sequelize.query(
