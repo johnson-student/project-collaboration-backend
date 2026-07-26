@@ -1,4 +1,4 @@
-const { aiRepository, projectRepository, taskRepository } = require("../repositories");
+const { aiRepository, projectRepository, taskRepository, withTransaction } = require("../repositories");
 const { ok, noContent, fail } = require("../utils/response");
 const { asyncHandler } = require("../middleware/error.middleware");
 const { callGemini } = require("../utils/gemini");
@@ -99,9 +99,24 @@ const chatTools = [
         },
       },
       {
+        name: "create_task",
+        description:
+          "Create a single new top-level task directly in this project (bypasses the /generate-task review flow). Use this ONLY when the user references a task/epic by name that does not exist in EXISTING TASKS and asks you to attach subtasks or other content to it — create the missing task first, then call create_subtasks with the id this returns. Do not use this for bulk task generation or when the user just wants task ideas — tell them to type /generate-task for that instead.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            title: { type: "STRING" },
+            description: { type: "STRING" },
+            priority: { type: "STRING", enum: PRIORITIES },
+            estimatedHours: { type: "NUMBER" },
+          },
+          required: ["title"],
+        },
+      },
+      {
         name: "create_subtasks",
         description:
-          "Add subtasks (checklist items) to one existing task in this project. taskId is the numeric id from the EXISTING TASKS list. When the user asks to generate subtasks, devise them yourself from context and pass them here.",
+          "Add subtasks (checklist items) to one existing task in this project. taskId is the numeric id from the EXISTING TASKS list, including one just created by create_task. When the user asks to generate subtasks, devise them yourself from context and pass them here.",
         parameters: {
           type: "OBJECT",
           properties: {
@@ -176,6 +191,49 @@ const runUpdateProject = async (args, { projectId, user, projectRole }) => {
     description: `${user.name} updated project ${keys.join(", ")} via AI assistant`,
   });
   return { success: true, updated: fields };
+};
+
+const runCreateTask = async (args, { projectId, user }) => {
+  const title = typeof args.title === "string" ? args.title.trim().slice(0, 300) : "";
+  if (!title) return { success: false, error: "title is required" };
+  const description = typeof args.description === "string" && args.description.trim() ? args.description.trim() : null;
+  const priority = PRIORITIES.includes(args.priority) ? args.priority : "Medium";
+  const estimatedHours =
+    Number.isFinite(Number(args.estimatedHours)) && Number(args.estimatedHours) > 0
+      ? Math.round(Number(args.estimatedHours) * 100) / 100
+      : null;
+
+  const taskId = await withTransaction(async (t) => {
+    const maxPos = await taskRepository.maxPosition({ status: "Todo", projectId, transaction: t });
+    const task = await taskRepository.create(
+      {
+        title,
+        description,
+        status: "Todo",
+        priority,
+        project_id: projectId,
+        reporter_id: user.id,
+        estimated_hours: estimatedHours,
+        position: (maxPos || 0) + 1,
+      },
+      t,
+    );
+    return task.id;
+  });
+
+  const total = await taskRepository.countTasks({ projectId });
+  const done = await taskRepository.countTasks({ projectId, status: "Done" });
+  await projectRepository.updateById(projectId, { progress: total ? Math.round((done / total) * 100) : 0 });
+
+  logActivity({
+    projectId,
+    userId: user.id,
+    eventType: "task_created",
+    description: `${user.name} created task "${title}" via AI assistant`,
+    meta: { task_id: taskId },
+  });
+
+  return { success: true, taskId, taskTitle: title };
 };
 
 const runCreateSubtasks = async (args, { projectId }) => {
@@ -266,6 +324,7 @@ const runAssignTask = async (args, { projectId, user }) => {
 
 const TOOL_RUNNERS = {
   update_project: runUpdateProject,
+  create_task: runCreateTask,
   create_subtasks: runCreateSubtasks,
   assign_task: runAssignTask,
 };
@@ -315,13 +374,15 @@ const chatSystemPrompt = (ctx) => `You are CollabFlow AI, a project management a
 
 You have tools and you MUST use them when the user asks for these actions:
 - update_project: change the project's name, description, deadline, status, or priority. Only works if the user is the project Owner or an Admin — if the tool reports a permission error, relay it.
-- create_subtasks: add subtasks (checklist items) to an existing task. Use the numeric id shown in EXISTING TASKS (e.g. #12) — never ask the user for an id; match the task they name (or described) to the list yourself, and only ask if two tasks genuinely match equally well. When the user asks you to generate or suggest subtasks, invent 3–8 specific subtasks yourself from the task title and project context and call the tool with them immediately — do NOT ask the user to provide the list. If the user targets several tasks (e.g. "all tasks", "the remaining tasks"), resolve the set yourself from EXISTING TASKS — "remaining" means tasks with no subtasks and not Done — and call create_subtasks once per task until every one of them is covered.
+- create_task: create ONE new top-level task on the spot. Use this narrowly — only when the user names a task or epic (e.g. "the Authentication task") that has NO match in EXISTING TASKS and asks you to attach subtasks (or anything else) to it. Create it with create_task first, then use the taskId it returns for create_subtasks in the same turn. Do not use create_task for open-ended "generate tasks" requests or to create more than one task — that's what ${GENERATE_COMMAND} is for (see Tool rules below).
+- create_subtasks: add subtasks (checklist items) to an existing task. Use the numeric id shown in EXISTING TASKS (e.g. #12), or one you just created with create_task — never ask the user for an id; match the task they name (or described) to the list yourself, and only ask if two tasks genuinely match equally well. If no task and no reasonable match exists, use create_task to create it rather than asking the user for an id. When the user asks you to generate or suggest subtasks, invent 3–8 specific subtasks yourself from the task title and project context and call the tool with them immediately — do NOT ask the user to provide the list. If the user is instead pointing at tasks you already proposed earlier in this conversation (e.g. from a ${GENERATE_COMMAND} reply) and asking you to attach them as subtasks of some task, reuse those exact titles/descriptions/priorities as the subtasks argument rather than inventing new ones. If the user targets several tasks (e.g. "all tasks", "the remaining tasks"), resolve the set yourself from EXISTING TASKS — "remaining" means tasks with no subtasks and not Done — and call create_subtasks once per task until every one of them is covered.
 - assign_task: assign a task to a team member, or unassign it (assigneeId 0). Match the member the user names to the TEAM list yourself and pass their user id — never ask for an id. Match tasks the same way as create_subtasks. If the user asks to distribute or balance several tasks across the team, decide a sensible split yourself from EXISTING TASKS (current assignees are shown there) and call assign_task once per task. Only ask when a name genuinely matches more than one member.
 
 Tool rules:
 - Never claim something was changed or created unless the tool call returned success. If it failed, tell the user exactly why.
 - After a successful call, briefly confirm what changed.
-- To create top-level project tasks, do NOT use tools — tell the user to type ${GENERATE_COMMAND}.
+- Never ask the user for a numeric task or task id — resolve names yourself from EXISTING TASKS, or create the task with create_task if it genuinely doesn't exist yet.
+- For open-ended requests to generate or brainstorm multiple new top-level tasks, do NOT use tools — tell the user to type ${GENERATE_COMMAND} instead, which lets them review each task before it's added.
 - For a full structured health report of the project, tell the user to type ${ANALYZE_COMMAND}.
 
 Be concise and practical. Write plain conversational text only (short paragraphs or "-" bullet lists; no markdown headers, no tables, and NEVER raw JSON).
@@ -429,7 +490,7 @@ const historyText = (m) => {
   try {
     const p = JSON.parse(m.content);
     if (p.type === "tasks")
-      return `${p.message}\n(Suggested ${p.tasks.length} draft tasks: ${p.tasks.map((t) => t.title).join("; ")})`;
+      return `${p.message}\n(Suggested ${p.tasks.length} draft tasks — not yet created unless the user added them via the board button:\n${p.tasks.map((t) => `- ${t.title} (${t.priority}${t.estimatedHours ? `, ~${t.estimatedHours}h` : ""})${t.description ? `: ${t.description}` : ""}`).join("\n")})`;
     if (p.type === "clarification")
       return `${p.message}\n${p.questions.map((q, i) => `${i + 1}. ${q}`).join("\n")}`;
     if (p.type === "analysis")
