@@ -7,6 +7,8 @@ const findById = (id, { attributes, transaction } = {}) =>
 
 const findByEmail = (email) => User.findOne({ where: { email } });
 
+const findByGoogleId = (googleId) => User.findOne({ where: { google_id: googleId } });
+
 const findByValidResetToken = (token) =>
   User.findOne({
     where: { reset_token: token, reset_token_expires: { [Op.gt]: new Date() } },
@@ -62,6 +64,7 @@ const searchByNameOrEmail = ({ q, includeIds, excludeIds, attributes, limit = 20
 module.exports = {
   findById,
   findByEmail,
+  findByGoogleId,
   findByValidResetToken,
   findByValidVerifyToken,
   create,

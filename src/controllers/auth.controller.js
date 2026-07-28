@@ -1,10 +1,13 @@
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
+const { OAuth2Client } = require("google-auth-library");
 const { userRepository } = require("../repositories");
 const { ok, created, fail } = require("../utils/response");
 const { asyncHandler } = require("../middleware/error.middleware");
 const { signAccess, signRefresh } = require("../middleware/auth.middleware");
 const { sendVerificationEmail } = require("../utils/email");
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const REFRESH_COOKIE_NAME = "refreshToken";
 const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
@@ -139,6 +142,9 @@ const login = asyncHandler(async (req, res) => {
   const user = await userRepository.findByEmail(email.toLowerCase());
   if (!user) return fail(res, "Invalid credentials", 401);
 
+  if (!user.password_hash)
+    return fail(res, "This account uses Google Sign-In — click 'Sign in with Google' instead", 400);
+
   const match = await bcrypt.compare(password, user.password_hash);
   if (!match) return fail(res, "Invalid credentials", 401);
 
@@ -148,6 +154,84 @@ const login = asyncHandler(async (req, res) => {
       "Please verify your email address before signing in. Check your inbox for the verification link.",
       403,
     );
+
+  const accessToken = signAccess({ id: user.id });
+  const refreshToken = signRefresh({ id: user.id });
+  const hashedRefresh = await bcrypt.hash(refreshToken, 8);
+  await userRepository.updateById(user.id, {
+    refresh_token: hashedRefresh,
+    status: "Active",
+  });
+  user.status = "Active";
+
+  setRefreshCookie(res, refreshToken);
+  ok(res, { user: safeUser(user), accessToken });
+});
+
+// ── POST /api/auth/google ────────────────────────────────────────────────
+// The frontend uses Google's OAuth2 token-client (a custom-styled button)
+// rather than the pre-rendered GIS credential button, so we receive an
+// access token here instead of a signed ID token. getTokenInfo() confirms
+// Google issued it for OUR client id (without this check, an access token
+// minted for a completely different app — with overlapping scopes — could
+// be replayed here to impersonate that account holder), then userinfo
+// fetches the profile the token authorizes.
+const googleLogin = asyncHandler(async (req, res) => {
+  const { accessToken: googleAccessToken } = req.body;
+  if (!googleAccessToken) return fail(res, "Google access token is required", 400);
+
+  let tokenInfo;
+  try {
+    tokenInfo = await googleClient.getTokenInfo(googleAccessToken);
+  } catch {
+    return fail(res, "Invalid Google credential", 401);
+  }
+  if (tokenInfo.aud !== process.env.GOOGLE_CLIENT_ID)
+    return fail(res, "Invalid Google credential", 401);
+
+  let profile;
+  try {
+    const resp = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${googleAccessToken}` },
+    });
+    if (!resp.ok) throw new Error("userinfo request failed");
+    profile = await resp.json();
+  } catch {
+    return fail(res, "Could not verify Google account", 401);
+  }
+
+  const { sub: googleId, email, name, email_verified: googleEmailVerified } = profile;
+  if (!email || !googleEmailVerified)
+    return fail(res, "Google account email is not verified", 401);
+
+  let user = await userRepository.findByGoogleId(googleId);
+
+  if (!user) {
+    // Google has already verified ownership of this email, so an existing
+    // password-based account with the same address is safe to link rather
+    // than reject or duplicate.
+    const existing = await userRepository.findByEmail(email.toLowerCase());
+    if (existing) {
+      await userRepository.updateById(existing.id, {
+        google_id: googleId,
+        email_verified: true,
+      });
+      user = await userRepository.findById(existing.id);
+    } else {
+      const initials = generateInitials(name || email);
+      const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+      user = await userRepository.create({
+        name: (name || email.split("@")[0]).trim(),
+        email: email.toLowerCase(),
+        google_id: googleId,
+        password_hash: null,
+        initials,
+        color,
+        status: "Active",
+        email_verified: true,
+      });
+    }
+  }
 
   const accessToken = signAccess({ id: user.id });
   const refreshToken = signRefresh({ id: user.id });
@@ -286,6 +370,7 @@ const resendVerification = asyncHandler(async (req, res) => {
 module.exports = {
   register,
   login,
+  googleLogin,
   refresh,
   logout,
   getMe,

@@ -83,6 +83,27 @@ const migrate = async () => {
     console.log("✅  Added users.verify_token_expires");
   }
 
+  // ── Google Sign-In ────────────────────────────────────────────────
+  if (!(await columnExists("users", "google_id"))) {
+    await sequelize.query(
+      "ALTER TABLE users ADD COLUMN google_id VARCHAR(255) NULL DEFAULT NULL AFTER email, ADD UNIQUE INDEX uq_users_google_id (google_id)",
+    );
+    console.log("✅  Added users.google_id");
+  }
+  {
+    // COLUMN_TYPE doesn't include nullability — check IS_NULLABLE directly.
+    const [rows] = await sequelize.query(
+      `SELECT IS_NULLABLE AS n FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'password_hash'`,
+    );
+    if (rows[0]?.n === "NO") {
+      await sequelize.query(
+        "ALTER TABLE users MODIFY password_hash VARCHAR(255) NULL DEFAULT NULL",
+      );
+      console.log("✅  users.password_hash is now nullable (Google-only accounts)");
+    }
+  }
+
   // ── Base tables added after the original schema ─────────────────────
   // Databases created from an early schema.sql predate these entirely,
   // so create them before trying to ALTER them. DDL matches schema.sql.

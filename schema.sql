@@ -42,7 +42,8 @@ CREATE TABLE users (
   id            INT UNSIGNED     NOT NULL AUTO_INCREMENT,
   name          VARCHAR(100)     NOT NULL,
   email         VARCHAR(191)     NOT NULL,
-  password_hash VARCHAR(255)     NOT NULL,
+  password_hash VARCHAR(255)         NULL DEFAULT NULL COMMENT 'NULL for Google-only accounts',
+  google_id     VARCHAR(255)         NULL DEFAULT NULL,
   role          VARCHAR(100)     NOT NULL DEFAULT 'Member',
   avatar        VARCHAR(500)         NULL DEFAULT NULL,
   initials      VARCHAR(4)           NULL,
@@ -60,6 +61,7 @@ CREATE TABLE users (
 
   PRIMARY KEY (id),
   UNIQUE KEY uq_users_email (email),
+  UNIQUE KEY uq_users_google_id (google_id),
   INDEX idx_users_status (status),
   INDEX idx_users_reset_token (reset_token),
   INDEX idx_users_verify_token (verify_token)
